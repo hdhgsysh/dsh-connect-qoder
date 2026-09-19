@@ -46,10 +46,10 @@ Node 没有内置 DPAPI 绑定，这一步交给 PowerShell，并通过临时文
 
 ### 从 DSH 市场安装（推荐给 DSH 桌面用户）
 
-在 DSH 的「插件市场」里粘贴以下任一源：
+在 DSH 的「插件市场」里粘贴这个源：
 
 ```
-github:HDHGSYSH/dsh-connect-qoder
+github:hdhgsysh/dsh-connect-qoder
 ```
 
 或本地开发模式：
