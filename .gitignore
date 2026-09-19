@@ -1,0 +1,18 @@
+# Build & test artefacts
+node_modules/
+*.tgz
+*.tar.gz
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local secrets and ad-hoc scripts that should never leave this machine
+.qoder-plugin-dev/
+*.local.json
+.env
+.env.*

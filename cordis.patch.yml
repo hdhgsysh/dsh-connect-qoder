@@ -1,0 +1,6 @@
+# Register the Qoder providers (CN + global) without changing the profile's
+# current default model. The plugin reuses the Qoder desktop app's own sign-in;
+# no separate OAuth flow is started.
+- insert:
+    - id: llm-qoder
+      name: dsh-connect-qoder
