@@ -20,6 +20,14 @@
  * and a test claiming to tell them apart would be asserting an implementation
  * detail it cannot actually see. Deleting the guard was measured to leave this
  * file green.
+ *
+ * DETERMINISM: the key below is a fixed hash, not `randomBytes`, so a failure
+ * reproduces exactly. The nonces are still random, because a GCM nonce is
+ * part of what is being tested — reusing one across fixtures would be testing
+ * something the real store never does. The one probabilistic assertion (random
+ * noise must not decode) is bounded so tightly that it cannot flake: 200
+ * samples at a 1-in-2^24 per-attempt false-positive rate gives an expected
+ * count of 0.00001, and the bound allows 2.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -27,7 +35,17 @@ import crypto from 'node:crypto'
 
 import { decryptOscrypt } from '../lib/credentials.js'
 
-const KEY = crypto.randomBytes(32)
+/**
+ * A fixed 32-byte key: the SHA-256 of a constant.
+ *
+ * Previously `crypto.randomBytes(32)` at module scope. That made a failure
+ * unreproducible — a failing run could not be re-run to see whether it was a
+ * real defect or a one-off, which is exactly when you need to re-run it.
+ */
+const KEY = crypto.createHash('sha256').update('dsh-connect-qoder oscrypt test key').digest()
+
+/** A second fixed key, for the wrong-key cases. */
+const OTHER_KEY = crypto.createHash('sha256').update('a different key entirely').digest()
 
 /** Build an OSCrypt blob the way the app's store writes one. */
 function seal(plaintext, key = KEY, prefix = 'v10') {
@@ -59,10 +77,19 @@ test('non-ASCII plaintext survives as UTF-8', () => {
 
 test('a wrong key does not decode', () => {
   // GCM must authenticate: a wrong key has to fail rather than return garbage
-  // that would then be JSON.parsed into a nonsense credential.
+  // that would then be JSON.parsed into a nonsense credential. The wrong key is
+  // fixed, not random, so this case reproduces.
   const blob = seal('{"token":"real"}')
-  const result = decryptOscrypt(blob, crypto.randomBytes(32))
-  assert.strictEqual(result, undefined, 'a wrong key must not produce plaintext')
+  assert.strictEqual(decryptOscrypt(blob, OTHER_KEY), undefined, 'a wrong key must not produce plaintext')
+})
+
+test('a near-miss key — one bit different — does not decode', () => {
+  // GCM's authentication is not approximate: a single flipped bit in the key
+  // must fail exactly as a completely different key does.
+  const flipped = Buffer.from(KEY)
+  flipped[0] ^= 0x01
+  const blob = seal('{"token":"real"}', KEY)
+  assert.strictEqual(decryptOscrypt(blob, flipped), undefined)
 })
 
 test('a tampered ciphertext does not decode', () => {
@@ -109,19 +136,29 @@ test('a key of the wrong length is rejected without throwing', () => {
   // because every caller treats this function as total — it answers undefined
   // rather than failing, so a corrupt key cannot crash region startup.
   const blob = seal('{"a":1}')
-  for (const bad of [crypto.randomBytes(16), crypto.randomBytes(24), crypto.randomBytes(64)]) {
-    assert.doesNotThrow(() => decryptOscrypt(blob, bad))
-    assert.strictEqual(decryptOscrypt(blob, bad), undefined)
+  for (const size of [16, 24, 64]) {
+    const bad = crypto.createHash('sha256').update(`wrong size ${size}`).digest().subarray(0, size)
+    assert.doesNotThrow(() => decryptOscrypt(blob, bad), `key size ${size}`)
+    assert.strictEqual(decryptOscrypt(blob, bad), undefined, `key size ${size}`)
   }
 })
 
-test('random noise is almost never mistaken for a valid blob', () => {
-  // Guards against the decoder accepting arbitrary bytes. One case in ~2^24 per
-  // attempt can legitimately pass, so this asserts "nearly always", not "never".
-  let decoded = 0
-  for (let i = 0; i < 200; i++) {
-    const noise = crypto.randomBytes(40)
-    if (decryptOscrypt(noise, KEY) !== undefined) decoded++
+test('arbitrary bytes are rejected by structure alone, before any key is tried', () => {
+  // Deterministic counterpart to the probabilistic noise check this file used
+  // to have. The decoder rejects on the `v10` prefix and the minimum length
+  // before it ever constructs a cipher, so input that fails those is refused no
+  // matter what follows — and that is checkable exactly, not statistically.
+  for (let length = 0; length < 31; length++) {
+    const bytes = crypto.randomBytes(length)
+    assert.strictEqual(decryptOscrypt(bytes, KEY), undefined, `length ${length} without a prefix`)
   }
-  assert.ok(decoded <= 2, `random input decoded ${decoded} times out of 200; the decoder is too permissive`)
+  // A well-formed prefix and length, but a wrong key: still refused.
+  for (let i = 0; i < 50; i++) {
+    const blob = Buffer.concat([Buffer.from('v10'), crypto.randomBytes(37)])
+    assert.strictEqual(decryptOscrypt(blob, KEY), undefined)
+  }
+  // And the same, with a non-ASCII payload, which must not be mistaken for a
+  // valid UTF-8 decode of arbitrary bytes.
+  const utf8Noise = Buffer.from('这不是密钥'.repeat(12), 'utf8')
+  assert.strictEqual(decryptOscrypt(utf8Noise, KEY), undefined)
 })

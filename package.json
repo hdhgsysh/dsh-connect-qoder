@@ -24,7 +24,8 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
-    "test": "node --test \"test/*.test.js\""
+    "test": "node --test \"test/*.test.js\"",
+    "test:coverage": "node --test --experimental-test-coverage \"test/*.test.js\""
   },
   "main": "lib/index.js",
   "exports": {
