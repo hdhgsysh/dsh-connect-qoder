@@ -45,6 +45,78 @@ function cardInstallsClock(rows) {
   return rows.some((m) => m.promotion?.active === true)
 }
 
+/**
+ * The card's per-row off-peak gate, reproduced for the same reason as
+ * {@link cardInstallsClock}.
+ *
+ * SYNC CONSTRAINT: this mirrors `offPeakState` in lib/client.js. The card
+ * evaluates the window in the browser so it can tick on its own, and that copy
+ * of the rule used to look at the window fields alone — not at
+ * `promotion.active`. Qoder keeps `windowStart`/`windowEnd` populated on a
+ * promotion it has switched off (upstream.normalizePromotion carries `active`
+ * and the window independently), so such a row was rendered at the DISCOUNTED
+ * rate during its own hours: a price the user is not charged, and one the host
+ * contradicted — the picker, resolving the same catalog entry through `rateNow`,
+ * correctly showed the `before` rate.
+ *
+ * The bug needs a mixed catalog to surface: the ticking clock is installed when
+ * ANY model reports `active === true`, and from then on every row re-resolves
+ * through this gate.
+ *
+ * This is a faithful transcription, guards and window arithmetic both, so the
+ * comparison below is over the whole verdict. It is a SPECIFICATION of the
+ * card's rule, not the card's code: the bundle is built from TypeScript sources
+ * not in this repository, so the real function cannot be imported here at all
+ * (see test/KNOWN_GAPS.md item 3). If the card's gate is rewritten, this copy
+ * has to be rewritten with it.
+ *
+ * @returns whether the card would render an off-peak badge for this row.
+ */
+function cardRendersOffPeak(row, now) {
+  const promo = row.promotion
+  if (promo === null || typeof promo !== 'object') return false
+  if (promo.active !== true) return false
+  const start = cardParseClock(promo.windowStart)
+  const end = cardParseClock(promo.windowEnd)
+  if (start === undefined || end === undefined || start === end) return false
+  const seconds = cardLocalSecondsOf(now, promo.timezone ?? 'Asia/Shanghai')
+  if (seconds === undefined) return false
+  // `end` not after `start` means the window crosses midnight.
+  return start < end ? seconds >= start && seconds < end : seconds >= start || seconds < end
+}
+
+/** `HH:MM` (or `HH:MM:SS`) to seconds past midnight, as the card parses it. */
+function cardParseClock(text) {
+  const match = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(String(text ?? '').trim())
+  if (match === null) return undefined
+  const hour = Number(match[1])
+  const minute = Number(match[2])
+  const second = Number(match[3] ?? 0)
+  if (hour > 23 || minute > 59 || second > 59) return undefined
+  return hour * 3600 + minute * 60 + second
+}
+
+/** Seconds past local midnight in `timezone`, as the card computes it. */
+function cardLocalSecondsOf(date, timezone) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      hourCycle: 'h23',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    }).formatToParts(date)
+    const read = (type) => Number(parts.find((part) => part.type === type)?.value ?? Number.NaN)
+    const hour = read('hour') % 24
+    const minute = read('minute')
+    const second = read('second')
+    if (![hour, minute, second].every(Number.isFinite)) return undefined
+    return hour * 3600 + minute * 60 + second
+  } catch {
+    return undefined
+  }
+}
+
 const PROMOTION = {
   active: true,
   windowStart: '22:00',
@@ -143,7 +215,80 @@ test('a bare model projects with no promotion block at all', () => {
   const row = projectModelRow(bare, REGION, NOW, RATES)
   assert.strictEqual(row.promotion, undefined)
   assert.strictEqual(cardInstallsClock([row]), false)
+  assert.strictEqual(cardRendersOffPeak(row, NOW), false, 'a model with no promotion shows no off-peak badge')
   assert.strictEqual(row.effectiveRate, 0.01)
+})
+
+test('a switched-off promotion shows the standard rate, not the discount', () => {
+  // The regression this file's second gate guards. Qoder leaves the window
+  // fields in place when it switches a promotion off, so "the window contains
+  // this instant" is not the same question as "the discount is live".
+  //
+  // The host already answered it correctly — `offPeakActive` is false and the
+  // rate is the `before` figure. What was wrong was the card's own copy of the
+  // rule, which showed this row at 0.01 while the picker charged 0.025.
+  const inactive = normalizeEntry({
+    key: 'GLM',
+    name: 'GLM 5.3',
+    priceFactor: 0.03,
+    promotion: { ...PROMOTION, active: false },
+  })
+  const row = projectModelRow(inactive, REGION, NOW, RATES)
+
+  // The host side, for reference: the window is open but the discount is off.
+  assert.strictEqual(row.offPeakActive, false, 'the host must not report a discount nobody gets')
+  assert.strictEqual(row.effectiveRate, 0.025, 'and must charge the before rate')
+
+  // The card side: the gate the fix added. Before it, this was true and the row
+  // rendered `x0.01` under a 错峰价 badge.
+  assert.strictEqual(
+    cardRendersOffPeak(row, NOW),
+    false,
+    'a promotion that is not active must render no off-peak badge and no discounted rate',
+  )
+})
+
+test('the two off-peak gates agree across the states a catalog can hold', () => {
+  // The card's gate and the host's must never disagree, because they render the
+  // same number in two places. Each case is built from what
+  // `upstream.normalizePromotion` can actually emit.
+  const cases = [
+    ['active window, inside its hours', { ...PROMOTION }, true],
+    ['active window, outside its hours', { ...PROMOTION }, false, '2026-09-26T12:00:00+08:00'],
+    ['switched off, hours still populated', { ...PROMOTION, active: false }, false],
+    ['no promotion at all', undefined, false],
+  ]
+  for (const [label, promotion, expectedActive, at] of cases) {
+    const when = at === undefined ? NOW : new Date(at)
+    const entry = normalizeEntry({
+      key: 'GLM',
+      name: 'GLM 5.3',
+      priceFactor: 0.03,
+      promotion,
+    })
+    const row = projectModelRow(entry, REGION, when, RATES)
+    assert.strictEqual(
+      cardRendersOffPeak(row, when),
+      row.offPeakActive,
+      `${label}: the card's gate and the host's must agree`,
+    )
+    assert.strictEqual(row.offPeakActive, expectedActive, `${label}: unexpected host verdict`)
+  }
+})
+
+test('a live promotion on one model does not put the others into off-peak', () => {
+  // The mixed catalog is what made the bug visible in the first place: the
+  // ticking clock is installed when ANY row reports `active === true`, so every
+  // row then re-resolves. A neighbour with its promotion off must still render
+  // the standard rate while the clock is ticking.
+  const live = normalizeEntry({ key: 'A', name: 'A', priceFactor: 0.03, promotion: { ...PROMOTION } })
+  const off = normalizeEntry({ key: 'B', name: 'B', priceFactor: 0.03, promotion: { ...PROMOTION, active: false } })
+  const rows = [projectModelRow(live, REGION, NOW, RATES), projectModelRow(off, REGION, NOW, RATES)]
+
+  assert.strictEqual(cardInstallsClock(rows), true, 'the live row installs the clock')
+  assert.strictEqual(cardRendersOffPeak(rows[0], NOW), true, 'and the live row renders off-peak')
+  assert.strictEqual(cardRendersOffPeak(rows[1], NOW), false, 'while its switched-off neighbour does not')
+  assert.strictEqual(rows[1].effectiveRate, 0.025, 'and the neighbour is still charged the before rate')
 })
 
 test('the projected row keeps identity and region fields', () => {
