@@ -5,40 +5,12 @@
 
 新增测试时请顺手更新本文件；删掉一条时请在提交信息里说明它为什么不再成立。
 
-**最近一次复核**：已解决 3 条（凭据缓存链路、目录落盘、CLI 入口），仍存在 4 条，
-其中 3 条是原理上不可测而非尚未动手。
+**最近一次复核**：已解决 4 条（凭据缓存链路、目录落盘、设置读回校验、CLI 入口），
+仍存在 3 条，其中 2 条是原理上不可测而非尚未动手。
 
 ---
 
-## 1. 设置保存的读回校验
-
-**位置**：`lib/index.js` 的 `__save` 路由（约 130 行）
-
-**为什么没测**：`lib/index.js` 顶层 import `@deepseek-ai/dsh-home-paths`、
-`@deepseek-ai/schemastery`、`@deepseek-ai/dsh-llm`，本仓库的测试环境不安装 peer
-依赖，因此该模块无法被 import。
-
-**为什么它重要**：这段代码的全部存在理由，是 DSH 0.1.7 的 `settingsScope.set()`
-会在原子写重试耗尽后**静默成功而不落盘**。它用「写入 → `mutate` → 读回 → 深度比较」
-来把假成功变成显式失败。用户在设置卡片上点保存，如果这个判定失效，界面会显示
-「已保存」而配置根本没变——而配置没变意味着模型选择、图像开关、上下文窗口
-全部没有生效，且没有任何提示。
-
-**已经测到哪一步**：`QODER_SAVE_FIELDS` 的合并规则（`regions` 按区域合并而非整体
-替换）**没有**被测。相邻的 `filterByEnabled`、`isCredentialUsable` 都测了，唯独
-这条合并规则是裸的。
-
-**要补上需要**：把 `__save` 的 handler 主体抽成一个接收 `settings` 与 `body` 的
-纯函数，路由只负责取 body 和写响应。这是最容易拆、收益最高的一处。
-
-**附带的实现风险**（不是覆盖问题，是代码问题）：namespace 匹配链的最后一两级用
-`String(entry.ns).includes(name)` 兜底。前面几级都是全等匹配，只有全落空才会走到
-这里，所以现实风险低，但 `'llm-qoder-extra'` 这类命名会被 `includes('llm-qoder')`
-命中，随后对**错误的 settings 行**执行 `mutate`。改成全等或显式前缀更稳妥。
-
----
-
-## 2. `toPiModel` 与 `adapter.js` 的其余部分
+## 1. `toPiModel` 与 `adapter.js` 的其余部分
 
 **位置**：`lib/adapter.js`
 
@@ -54,7 +26,30 @@ harness 报 `finish: max-tokens`）。这两处目前只有注释守着。
 已全部移到 `lib/offpeak.js` 并被完整覆盖。
 
 **要补上需要**：把 `toPiModel` 的输出构造（与 `PiAiAdapter` 无关的那部分）抽到
-无依赖模块，或用 `node --experimental-test-module-mocks` 桩掉 pi-ai。
+无依赖模块，或用 `node --experimental-test-module-mocks` 桩掉 pi-ai
+（已验证可行：桩掉三个 `@deepseek-ai/*` 之后 `lib/index.js` 可以被 import）。
+后者更贴近真实调用，但要在 test script 上加 flag。
+
+---
+
+## 2. `RegionRuntime` 本身与 `activate` 的 Cordis 接线
+
+**位置**：`lib/index.js`（约 800 行）
+
+**为什么没测**：模块顶层 import 四个 `@deepseek-ai/*` peer 包，本仓库不安装。
+
+**已经测到哪一步**：这个文件里所有**纯逻辑**都已经搬出去了——
+凭据缓存（`lib/credential-cache.js`）、目录落盘（`lib/catalog-store.js`）、
+设置写入与读回（`lib/settings-save.js`）、行投影与过滤（`lib/catalog-entry.js`）。
+留下的只有 HTTP 路由的收发、provider 注册、以及 dispose 时的定时器清理。
+
+**剩下的风险**：`ctx.inject(['webServer'])` 里的路由注册本身（路径、method 校验、
+64 KiB body 上限）；`ctx.effect` 的 dispose 时序（定时器与在途 `refreshCatalog`
+的竞态）；`registerAdapter` 失败时的回滚是否真的释放了 shim 端口。
+
+**要补上需要**：`--experimental-test-module-mocks` 加一套 Cordis 桩，
+或把每条路由的 handler 抽成 `(req, deps) => result` 的纯函数。
+后者与 `applySettingsSave` 是同一套路，已经证明可行。
 
 ---
 
@@ -131,8 +126,8 @@ harness 报 `finish: max-tokens`）。这两处目前只有注释守着。
 - **没有变异测试 harness**。本文件里每一条「实测全绿」都是手工跑出来的
   （逐个改坏、跑测试、看是否变红、还原）。没有 `mutmut` 之类的工具把它们变成
   持续的门禁，所以下一个改动可能悄悄重新引入其中一条。
-- **覆盖率没有门槛**。`npm run test:coverage` 会输出数字（当前整体行覆盖约 57%，
-  函数覆盖约 51%），但没有阈值。低覆盖率本身不是问题——`lib/index.js` 的 HTTP
-  路由与 Cordis 接线在单元测试里天然难覆盖——真正的问题是**哪些具体回归被守住**，
+- **覆盖率没有门槛**。`npm run test:coverage` 会输出数字（当前整体行覆盖约 61%，
+  函数覆盖约 57%），但没有阈值。低覆盖率本身不是问题——`lib/index.js` 的 Cordis
+  接线在单元测试里天然难覆盖——真正的问题是**哪些具体回归被守住**，
   而那个没法用百分比表达。
 - **CI 不跑覆盖率门槛**，只跑测试。见 `.github/workflows/test.yml`。

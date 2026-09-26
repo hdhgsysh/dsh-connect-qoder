@@ -98,6 +98,7 @@ dsh plugin --profile web add <本仓库路径>
 | `lib/catalog-entry.js` | 目录条目的归一化、模型过滤与卡片行投影（无 peer 依赖） |
 | `lib/catalog-store.js` | 目录的磁盘缓存与原子落盘（无 peer 依赖） |
 | `lib/credential-cache.js` | 凭据缓存与「登录失效后重读」规则（无 peer 依赖） |
+| `lib/settings-save.js` | 设置写入与落盘校验（无 peer 依赖） |
 | `lib/offpeak.js` | 错峰窗口与费率算术（无 peer 依赖） |
 | `lib/errors.js` | 上游错误分类与「凭据是否过期」判定（无 peer 依赖） |
 | `lib/index.js` | 按区域注册 provider 的插件入口 |
@@ -127,6 +128,9 @@ PowerShell，这些在别的平台上行为不同。
 - `test/credential-invalidation.test.js` —— 上面那条链路上的两个纯谓词。
 - `test/errors-classify.test.js` —— 105 与 10605 的优先级决定了「提示用户重新登录」
   还是「排队等待」，两者弄反的代价完全不同。
+- `test/settings-save.test.js` —— DSH 0.1.7 上 `set()` 会静默成功而不落盘；
+  这段代码用「写入→读回→深比较」把假成功变成显式失败，测试里直接模拟
+  「`mutate` 成功但文档没变」的那个场景。
 - `test/catalog-store.test.js` —— 目录缓存的原子落盘，用真实临时目录跑，
   在 CI 所在的平台上实测 `rename` 覆盖行为，而不是在注释里假设。
 - `test/shim.test.js` —— 回环端点的鉴权与 `/v1/models` 过滤；对着真实
