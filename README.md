@@ -156,15 +156,35 @@ dsh plugin --profile web add <本仓库路径>
 ## 测试
 
 ```sh
+npm run verify          # 下面三条串起来，全过才算过
 npm test                # node --test "test/*.test.js"
 npm run test:coverage   # 同上 + 覆盖率门槛（行 68 / 分支 85 / 函数 66，跌破即失败）
 npm run verify:deploy   # 比对已部署副本与本仓库，报告漂移
 npm run build           # 从 src/client 重建 lib/client.js
 ```
 
+`npm run verify` 跑三件事，每件回答一个不同的问题：
+
+| 步骤 | 回答什么 | 全过时的输出 |
+|---|---|---|
+| `npm test` | 卡片逻辑与宿主半边没被改坏 | `# pass 269` / `# fail 0` |
+| `build --tsdown`（不写） | `lib/client.js` **确实**由 `src/client/` 生成 | `MATCH: … byte-for-byte identical` |
+| `verify:bundle` | 重建产物与 HEAD 的行为一致 | `behaviour: IDENTICAL` |
+
+中间那条是最要紧的：它不写产物，只比较。它过了，就说明产物不是手抄进来的副本——改
+`src/` 而产物不变的情况会在这里红。
+
+**绿灯不等于门禁有效。** 这三道门禁每条都用故意的破坏验过：`build` 缺关键串时会拒绝写入
+（第一次构建摇掉全部模块、只剩 84 行，bundler 仍然退出 0）；`verify:bundle` 把探针下界从
+`Math.max(0, …)` 改成 `1`，就会在 `formatCountdown|undefined|0` 上报出 `00:00:00` →
+`00:00:01` 并以非 0 退出。怀疑门禁时照这个法子再破一次，比看它绿不绿有用。
+
 `npm run build` 需要构建器（`tsdown`），它是 devDependency，跑之前先 `npm install`。
 **测试仍然不需要安装任何东西**（裸 `node --test`），两者是 CI 里分开的两个 job：一个证明
 测试无依赖，一个证明产物可重建。
+
+对拍覆盖不到渲染：JSX 被 stub 成 `null`，所以**改了 UI 仍然要在浏览器里看一眼**（展开卡片 →
+切区域 → 改图像档位 → 保存 → 看错峰倒计时）。
 
 `.npmrc` 里的 `legacy-peer-deps=true` 是必需的、不是随手加的：本包的 peer 依赖是
 `@deepseek-ai/*`，由宿主在运行时提供，不在公共 registry 上，npm 自动安装 peer 会在装到
