@@ -301,3 +301,33 @@ test('the projected row keeps identity and region fields', () => {
   assert.strictEqual(row.isDefault, true)
   assert.strictEqual(row.offPeakActive, true)
 })
+
+// --- context window label -------------------------------------------------
+
+test('a model with real context options shows its default window', () => {
+  const row = projectModelRow(ENTRY, REGION, NOW, RATES, false)
+  assert.strictEqual(row.contextWindow, 128000)
+  assert.strictEqual(row.contextWindowLabel, '128K')
+})
+
+test('preferring the maximum shows the widest offered window', () => {
+  const row = projectModelRow(ENTRY, REGION, NOW, RATES, true)
+  assert.strictEqual(row.contextWindow, 200000)
+  assert.strictEqual(row.contextWindowLabel, '200K')
+})
+
+test('a model with no context options shows no window label', () => {
+  const bare = normalizeEntry({
+    key: 'Kimi',
+    name: 'Kimi K3',
+    priceFactor: 0.01,
+    defaultContextWindow: 0,
+    contextOptions: [],
+    maxInputTokens: 32000,
+  })
+  const row = projectModelRow(bare, REGION, NOW, RATES, true)
+  // `max_input_tokens` is a per-request floor, not a window Qoder offers;
+  // the label stays empty rather than claiming a real choice.
+  assert.strictEqual(row.contextWindow, 32000)
+  assert.strictEqual(row.contextWindowLabel, '')
+})

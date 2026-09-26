@@ -29,7 +29,9 @@ import assert from 'node:assert/strict'
 import {
   FALLBACK_CONTEXT_WINDOW,
   NO_COST,
+  contextWindowLabelFor,
   displayNameFor,
+  formatContextWindow,
   imageEnabled,
   resolveContextWindow,
   thinkingLevelMapFor,
@@ -179,6 +181,28 @@ test('non-numeric and non-positive window values are ignored', () => {
     200000,
   )
   assert.strictEqual(resolveContextWindow({ ...baseEntry, defaultContextWindow: 0, maxInputTokens: 'x' }, false), FALLBACK_CONTEXT_WINDOW)
+})
+
+test('formatContextWindow matches the catalog naming for K/M sizes', () => {
+  assert.strictEqual(formatContextWindow(1000000), '1M')
+  assert.strictEqual(formatContextWindow(200000), '200K')
+  assert.strictEqual(formatContextWindow(128000), '128K')
+  assert.strictEqual(formatContextWindow(0), '')
+  assert.strictEqual(formatContextWindow(NaN), '')
+})
+
+test('the window label is empty when upstream declared no selectable windows', () => {
+  // `max_input_tokens` and the built-in fallback are local degradation values,
+  // not windows Qoder offers; showing them as a label would claim a choice
+  // that does not exist.
+  const bare = { ...baseEntry, defaultContextWindow: 0, contextOptions: [] }
+  assert.strictEqual(contextWindowLabelFor(bare, true), '')
+  assert.strictEqual(contextWindowLabelFor(bare, false), '')
+})
+
+test('the window label is the maximum or default window depending on the switch', () => {
+  assert.strictEqual(contextWindowLabelFor(baseEntry, false), '128K')
+  assert.strictEqual(contextWindowLabelFor(baseEntry, true), '1M')
 })
 
 // --- image input ---------------------------------------------------------
