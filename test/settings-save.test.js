@@ -123,6 +123,7 @@ test('a field that exists only on the prototype is reported as unknown', () => {
   // own-properties-only, so it cannot leak the prototype's members.
   assert.deepStrictEqual(Object.keys(SAVE_FIELDS), [
     'enabledModelIds',
+    'enabledRegions',
     'imageOverrides',
     'useMaximumContextWindow',
   ])
@@ -285,6 +286,20 @@ test('the per-region merge starts from the live value, not from empty', async ()
   assert.deepStrictEqual(result.body.value, { 'qoder-cn': ['A'] })
 })
 
+test('saving one region\'s provider switch does not delete the other', async () => {
+  // The card posts the complete map, but the merge is what keeps it safe even
+  // if a partial map is ever sent: flipping one region's switch can never
+  // drop the other region's stored flag, the same guarantee the per-model
+  // roster gets.
+  const settings = makeSettings({
+    value: { enabledRegions: { 'qoder-cn': false, qoder: true } },
+  })
+  const result = await save(settings, 'enabledRegions', { 'qoder-cn': true })
+  assert.strictEqual(result.body.ok, true)
+  assert.deepStrictEqual(result.body.value, { 'qoder-cn': true, qoder: true })
+  assert.strictEqual(result.body.readBack['qoder'], true, 'the other region must survive')
+})
+
 test('a whole-shaped field replaces rather than merges', async () => {
   // The card always posts the complete value for these, so a merge would leave
   // stale keys behind — e.g. a model whose image mode was reset.
@@ -305,15 +320,17 @@ test('a boolean field round-trips', async () => {
   assert.strictEqual(off.body.readBack, false)
 })
 
-test('the field list is exactly the three the card writes', () => {
+test('the field list is exactly the four the card writes', () => {
   // A typo here would make a field unwritable with a 400 the card cannot
   // explain, so the set is pinned.
   assert.deepStrictEqual(Object.keys(SAVE_FIELDS).sort(), [
     'enabledModelIds',
+    'enabledRegions',
     'imageOverrides',
     'useMaximumContextWindow',
   ])
   assert.strictEqual(SAVE_FIELDS.enabledModelIds, 'regions')
+  assert.strictEqual(SAVE_FIELDS.enabledRegions, 'regions')
   assert.strictEqual(SAVE_FIELDS.imageOverrides, 'whole')
   assert.strictEqual(SAVE_FIELDS.useMaximumContextWindow, 'whole')
 })

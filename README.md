@@ -89,6 +89,11 @@ dsh plugin --profile web add <本仓库路径>
   注册 adapter，失败时回滚到原注册，不影响已在服务的区域）——重新登录后不必再重启 DSH；
   「在线确认」是账号流程里唯一的联网调用（`fetchUserInfo`），回答「上游现在还认不认
   这个登录」，失败按 `classifyUpstreamError` 分档（`sign-in-expired` / 其他）。
+- **每一版的模型可以单独关掉**（`enabledRegions`，账号面板的「模型」开关，对齐
+  WorkBuddy 的 per-tab 供应商开关）：取消勾选的一版向 DSH 提供**零个模型**，它的
+  模型组按「空目录即隐藏」的同一条规则从选择器消失，但登录、用量与模型筛选全部
+  保留，重新勾选即恢复，无需重启 DSH；卡片模型列表与选择器用同一个
+  `regionEnabledFor` 谓词过滤，两个界面不会打架。
 - 依赖 Qoder 客户端接口（非官方开放 API），Qoder 更新后插件可能需要随之调整。
 - **设置保存走插件的 `__save` 主机端点 + 读回校验**（对齐 WorkBuddy 0.1.7 修复）：DSH 0.1.7 的
   客户端 `settingsScope.set()` 在原子写重试耗尽后会**静默返回成功而不落盘**，卡片改为「主机端点
@@ -103,14 +108,14 @@ dsh plugin --profile web add <本仓库路径>
 | `lib/credentials.js` | 从 Qoder 应用读取并解密登录凭据 |
 | `lib/upstream.js` | COSY 签名、请求体编码、目录与对话流 |
 | `lib/shim.js` | 面向 pi-ai 的 OpenAI 兼容回环端点 |
-| `lib/adapter.js` | pi-ai provider 与 `PiAiAdapter` profile |
-| `lib/catalog-entry.js` | 目录条目的归一化、模型过滤与卡片行投影（无 peer 依赖） |
+| `lib/adapter.js` | pi-ai provider 与 `PiAiAdapter` profile（被关的 provider 以零模型组呈现，由 DSH 自行隐藏） |
+| `lib/catalog-entry.js` | 目录条目的归一化、模型过滤（含按区域开关）与卡片行投影（无 peer 依赖） |
 | `lib/catalog-store.js` | 目录的磁盘缓存与原子落盘（无 peer 依赖） |
 | `lib/credential-cache.js` | 凭据缓存与「登录失效后重读」规则（无 peer 依赖） |
 | `lib/account-state.js` | 每区域账号状态四档判定（`ok` / `expired` / `needs-app` / `signed-out`；纯本地证据、不含凭据，无 peer 依赖） |
 | `lib/settings-save.js` | 设置写入、按区域合并与落盘读回校验（无 peer 依赖） |
 | `lib/pi-model.js` | pi-ai 模型描述符的构造（纯函数，无 peer 依赖） |
-| `lib/preferences.js` | 三个设置项的读取与 volatile 解包（无 peer 依赖） |
+| `lib/preferences.js` | 四个设置项的读取与 volatile 解包（`enabledRegions` 区域开关：缺失/非对象一律读作开启，只有显式 `false` 才关） |
 | `lib/offpeak.js` | 错峰窗口与费率算术（无 peer 依赖） |
 | `lib/errors.js` | 上游错误分类与「凭据是否过期」判定（无 peer 依赖） |
 | `lib/index.js` | 按区域注册 provider 的插件入口，与模型/用量/保存/账号状态路由（账号路由含「重读登录」的上线与回滚） |

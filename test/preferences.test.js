@@ -27,6 +27,7 @@ import {
   enabledIdsFor,
   imageModeFor,
   preferMaximumContext,
+  regionEnabledFor,
   resolvePreferences,
   unwrapReference,
 } from '../lib/preferences.js'
@@ -209,4 +210,43 @@ test('the readers tolerate a missing preferences object', () => {
   assert.doesNotThrow(() => enabledIdsFor(undefined, 'qoder-cn'))
   assert.doesNotThrow(() => imageModeFor(undefined, 'ModelA'))
   assert.doesNotThrow(() => preferMaximumContext(undefined))
+  assert.doesNotThrow(() => regionEnabledFor(undefined, 'qoder-cn'))
+})
+
+// --- per-region provider switch ------------------------------------------
+
+test('a region is offered by default; only an explicit false disables it', () => {
+  // The switch is opt-out: a fresh install has saved nothing and offers every
+  // readable region. Both "no field at all" and "no key for this region" read
+  // as offered.
+  assert.strictEqual(regionEnabledFor({}, 'qoder-cn'), true)
+  assert.strictEqual(regionEnabledFor({ enabledRegions: {} }, 'qoder-cn'), true)
+  assert.strictEqual(regionEnabledFor({ enabledRegions: { qoder: false } }, 'qoder-cn'), true)
+  assert.strictEqual(regionEnabledFor({ enabledRegions: ref({ qoder: false }) }, 'qoder-cn'), true)
+  // An explicit false is the only disabling value; true and stored-truthy junk
+  // all read as offered.
+  assert.strictEqual(regionEnabledFor({ enabledRegions: { 'qoder-cn': false } }, 'qoder-cn'), false)
+  assert.strictEqual(regionEnabledFor({ enabledRegions: { 'qoder-cn': true } }, 'qoder-cn'), true)
+  assert.strictEqual(regionEnabledFor({ enabledRegions: { 'qoder-cn': 'yes' } }, 'qoder-cn'), true)
+})
+
+test('the region switch is read through a volatile reference', () => {
+  assert.strictEqual(regionEnabledFor({ enabledRegions: ref({ 'qoder-cn': false }) }, 'qoder-cn'), false)
+  assert.strictEqual(regionEnabledFor({ enabledRegions: ref({ 'qoder-cn': true }) }, 'qoder-cn'), true)
+})
+
+test('a non-map region switch degrades to offered', () => {
+  // A hand-edited settings file can hold anything; a non-object map means "no
+  // switch was ever saved", which is the offered default rather than a fault.
+  for (const value of [null, undefined, 'off', 0, [], false]) {
+    assert.strictEqual(regionEnabledFor({ enabledRegions: value }, 'qoder-cn'), true, String(value))
+  }
+})
+
+test('a prototype property is not a region switch', () => {
+  // `map['constructor']` would read the prototype chain; only own keys count,
+  // so an inherited member can never read as an explicit `false`.
+  for (const key of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__']) {
+    assert.strictEqual(regionEnabledFor({ enabledRegions: {} }, key), true, `${key} must read as offered`)
+  }
 })

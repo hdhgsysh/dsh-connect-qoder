@@ -69,6 +69,31 @@ test('a region with an empty catalog contributes nothing and does not fail', () 
   assert.strictEqual(payload.models[0].region, 'qoder')
 })
 
+test('a switched-off region contributes nothing, and the sibling is untouched', () => {
+  // The per-region provider switch: an explicit `false` hides the whole region
+  // from the card's model list, exactly as the adapter hides it from the
+  // picker. The other region's rows are unaffected, and a missing map (no
+  // switch ever saved) offers everything — the fresh-install default.
+  const runtimes = [
+    runtimeOf('qoder-cn', [entryFor({ key: 'A', name: 'CN A' })]),
+    runtimeOf('qoder', [entryFor({ key: 'B', name: 'Global B' })]),
+  ]
+  const off = build(runtimes, { enabledRegions: { 'qoder-cn': false } })
+  assert.deepStrictEqual(
+    off.models.map((m) => m.region),
+    ['qoder'],
+    'the disabled region contributes no rows',
+  )
+  const onAgain = build(runtimes, { enabledRegions: { 'qoder-cn': true, qoder: false } })
+  assert.deepStrictEqual(
+    onAgain.models.map((m) => m.id).sort(),
+    ['CNA'],
+    're-checking one side offers it back, with the other side now off',
+  )
+  const neverSaved = build(runtimes)
+  assert.strictEqual(neverSaved.models.length, 2, 'an absent switch offers every region')
+})
+
 test('no regions at all yields an empty list, not a crash', () => {
   // The route is mounted before the regions are known to have started, so
   // "none yet" is a state it can be asked in.
