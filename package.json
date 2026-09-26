@@ -25,7 +25,8 @@
   },
   "scripts": {
     "test": "node --test \"test/*.test.js\"",
-    "test:coverage": "node --test --experimental-test-coverage \"test/*.test.js\""
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=68 --test-coverage-branches=85 --test-coverage-functions=66 \"test/*.test.js\"",
+    "verify:deploy": "node scripts/check-deploy-drift.mjs"
   },
   "main": "lib/index.js",
   "exports": {

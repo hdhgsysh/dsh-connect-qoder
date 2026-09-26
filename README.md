@@ -44,6 +44,11 @@ Node 没有内置 DPAPI 绑定，这一步交给 PowerShell，并通过临时文
 没有桌面应用登录时，可以用官方文档的 **PAT** 兜底：设置 `QODERCN_PAT`（国内版）或
 `QODER_PAT`（国际版），插件会用它换取 job token。
 
+**平台边界：零配置路径只在 Windows 成立。** 解密链路是 PowerShell + DPAPI（`Crypt32.dll`），
+`lib/` 里没有任何 macOS / Linux 分支——在其它平台上应用凭据永远探测不到（`loadCredential`
+返回 `undefined`，该区域不注册），只剩上面的 PAT 兜底。CI 的 Ubuntu 绿灯说明**测试**在那边
+能跑，不等于零配置在 Linux 上存在。
+
 ## 安装
 
 ### 从 DSH 市场安装（推荐给 DSH 桌面用户）
@@ -136,9 +141,17 @@ dsh plugin --profile web add <本仓库路径>
 ## 测试
 
 ```sh
-npm test             # node --test "test/*.test.js"
-npm run test:coverage   # 同上，加 --experimental-test-coverage
+npm test                # node --test "test/*.test.js"
+npm run test:coverage   # 同上 + 覆盖率门槛（行 68 / 分支 85 / 函数 66，跌破即失败）
+npm run verify:deploy   # 比对已部署副本与本仓库，报告漂移
 ```
+
+`verify:deploy` 存在的理由和上面那些测试一样：**一台机器上可以同时装着好几个版本的本插件**。
+`link:` 安装是指向本仓库的符号链接、永远最新；市场安装是**复制**，停在安装那一刻，
+而且两边 `package.json` 的 `version` 一样——任何按版本判断新旧的升级路径都会认为「已是最新」。
+该脚本比对 `lib/**` 的内容哈希、文件清单，以及三个由真实缺陷换来的标记
+（错峰 `active` 门、账号状态模块、账号路由），并把「版本号相同但内容不同」单独标出来。
+`test/deploy-drift.test.js` 用假目录树钉住这套判定。
 
 CI 在 Node 22.19 / 24 × Ubuntu / Windows 上跑（`.github/workflows/test.yml`）——
 Windows 不是冗余：shim 绑定回环监听、目录缓存依赖 rename 覆盖、凭据读取要调

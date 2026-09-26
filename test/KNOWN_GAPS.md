@@ -162,8 +162,12 @@
 - **没有变异测试 harness**。本文件里每一条「实测全绿」都是手工跑出来的
   （逐个改坏、跑测试、看是否变红、还原）。没有 `mutmut` 之类的工具把它们变成
   持续的门禁，所以下一个改动可能悄悄重新引入其中一条。
-- **覆盖率没有门槛**。`npm run test:coverage` 会输出数字（当前整体行覆盖约 61%，
-  函数覆盖约 57%），但没有阈值。低覆盖率本身不是问题——`lib/index.js` 的 Cordis
-  接线在单元测试里天然难覆盖——真正的问题是**哪些具体回归被守住**，
-  而那个没法用百分比表达。
-- **CI 不跑覆盖率门槛**，只跑测试。见 `.github/workflows/test.yml`。
+  注：两处最要害的变异现在**已经由静态断言守住**——`test/client-bundle.test.js`
+  钉住 bundle 文本里的 `promo.active !== true`，`test/pi-model.test.js` 钉住
+  `compat.supportsDeveloperRole === false`，破坏它们各自都会变红；其余「实测全绿」
+  的条目（5a–5c）仍是手工的。
+- **覆盖率门槛已建立**（本条的前两版登记「没有阈值」，现已不成立）：
+  `npm run test:coverage` 带 `--test-coverage-lines=68 --test-coverage-branches=85
+  --test-coverage-functions=66`，CI 直接失败于跌破门槛（当前实测 71.17 / 87.38 /
+  69.51）。门槛是**地板不是分数**：它防的是悄悄丢覆盖，守不住的仍是「哪些具体回归
+  被挡住」——那还得看本文件。

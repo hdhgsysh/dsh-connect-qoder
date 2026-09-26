@@ -32,10 +32,11 @@ jobs:
       - name: Run tests
         run: npm test
 
-      # Reported, not enforced. A hard threshold would be a ratchet that has to
-      # be raised every time a module is split, and the number that matters —
-      # whether a specific regression is caught — is not expressible as a
-      # percentage. test/KNOWN_GAPS.md is the real register of what is and is
-      # not defended.
+      # Enforced as a FLOOR, not as a score: `test:coverage` carries
+      # --test-coverage-lines/functions/branches set a little under the current
+      # numbers, so a change that silently loses coverage fails the build while
+      # an honest module split does not. A percentage still cannot say whether a
+      # specific regression is defended — test/KNOWN_GAPS.md remains the real
+      # register, and raising a threshold is a one-line review, not a redesign.
       - name: Coverage
         run: npm run test:coverage
