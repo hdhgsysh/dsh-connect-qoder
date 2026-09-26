@@ -26,7 +26,10 @@
   "scripts": {
     "test": "node --test \"test/*.test.js\"",
     "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=68 --test-coverage-branches=85 --test-coverage-functions=66 \"test/*.test.js\"",
-    "verify:deploy": "node scripts/check-deploy-drift.mjs"
+    "verify:deploy": "node scripts/check-deploy-drift.mjs",
+    "verify:bundle": "node scripts/verify-bundle-behaviour.mjs",
+    "build": "node scripts/build-client.mjs --tsdown --write",
+    "prepack": "npm run build"
   },
   "main": "lib/index.js",
   "exports": {
@@ -42,6 +45,9 @@
     "cordis.patch.yml",
     "README.md"
   ],
+  "devDependencies": {
+    "tsdown": "^0.23.0"
+  },
   "license": "MIT",
   "dsh": {
     "bundle": {

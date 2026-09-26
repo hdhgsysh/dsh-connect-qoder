@@ -135,10 +135,23 @@ dsh plugin --profile web add <本仓库路径>
 | `lib/errors.js` | 上游错误分类与「凭据是否过期」判定（无 peer 依赖） |
 | `lib/index.js` | 按区域注册 provider 的插件入口，与模型/用量/保存/账号状态路由（账号路由含「重读登录」的上线与回滚） |
 
-`lib/client.js` 是例外：它是 esbuild 产物，源码（`src/client/*.ts`）不在本仓库，
-也没有 sourcemap 或构建脚本可以重新生成它。`test/client-bundle.test.js` 直接从
-这份产物里**提取并执行**卡片的关键纯函数，因此改产物会让测试变红——这是目前
-唯一能守住卡片代码的手段。
+`lib/client.js` 是注入到宿主设置页的那张卡片的构建产物（`react` 由宿主提供，产物不打包它）。
+它的源码在 `src/client/`，`npm run build` 从源码重建它：
+
+| `src/client/paths.ts` | 卡片用到的五条插件路由 |
+| `src/client/styles.ts` | 卡片样式与 `installStyles`（`dsm-*` 一套与 `dsh-connect-workbuddy` 逐字一致，原因见文件头） |
+| `src/client/settings-write.ts` | 「写入后读回校验」的浏览器半边 |
+| `src/client/copy.ts` | 卡片文案（中/英） |
+| `src/client/card.ts` | 卡片的纯函数与五个组件（`QoderPluginCard` / `QoderUsagePanel` / `QoderAccountPanel` / `RegionUsage` / `QuotaBlock`） |
+| `src/client/index.ts` | 注册入口（`apply` / `inject` / `name`） |
+
+**这些源码不是原始手稿，是还原出来的**：2026-09 用 `scripts/restore-client-src.mjs` 把当时的
+产物按 `//#region` 标记机械切分而成，模块边界来自产物，`card.ts` 那一段在产物里没有标记、
+是按引用关系推断的。还原后做过一次对拍——13 个纯函数 × 420 组输入共 5460 次调用，新旧产物的
+返回值与抛错逐条一致（方法记录在 `docs/issues/17-client-source-restore.md`）。
+
+产物是构建输出：**改源码重建，不要手改产物**。`test/client-bundle.test.js` 从产物里**提取并
+执行**卡片的纯函数，所以产物一改那里的断言就得跟着看一眼。
 
 ## 测试
 
@@ -146,7 +159,16 @@ dsh plugin --profile web add <本仓库路径>
 npm test                # node --test "test/*.test.js"
 npm run test:coverage   # 同上 + 覆盖率门槛（行 68 / 分支 85 / 函数 66，跌破即失败）
 npm run verify:deploy   # 比对已部署副本与本仓库，报告漂移
+npm run build           # 从 src/client 重建 lib/client.js
 ```
+
+`npm run build` 需要构建器（`tsdown`），它是 devDependency，跑之前先 `npm install`。
+**测试仍然不需要安装任何东西**（裸 `node --test`），两者是 CI 里分开的两个 job：一个证明
+测试无依赖，一个证明产物可重建。
+
+`.npmrc` 里的 `legacy-peer-deps=true` 是必需的、不是随手加的：本包的 peer 依赖是
+`@deepseek-ai/*`，由宿主在运行时提供，不在公共 registry 上，npm 自动安装 peer 会在装到
+devDependencies 之前就失败。
 
 `verify:deploy` 存在的理由和上面那些测试一样：**一台机器上可以同时装着好几个版本的本插件**。
 `link:` 安装是指向本仓库的符号链接、永远最新；市场安装是**复制**，停在安装那一刻，

@@ -40,3 +40,36 @@ jobs:
       # register, and raising a threshold is a one-line review, not a redesign.
       - name: Coverage
         run: npm run test:coverage
+
+  # A separate job, and that is the point: `npm test` must keep working on a
+  # bare checkout with nothing installed (see the note at the top), while
+  # rebuilding the card needs a bundler. Splitting them keeps both guarantees
+  # instead of trading one for the other — one job proves the suite is
+  # dependency-free, this one proves the artifact is reproducible.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.19'
+
+      # `.npmrc` sets legacy-peer-deps: the `@deepseek-ai/*` peers are supplied
+      # by the host at runtime and are not on the public registry, so npm's
+      # automatic peer install would fail before reaching tsdown.
+      - run: npm install --no-audit --no-fund
+
+      - name: Rebuild the card from src/client
+        run: npm run build
+
+      # The committed bundle must be exactly what the sources produce. A change
+      # that edits src/ without rebuilding fails here rather than shipping an
+      # artifact nobody can reproduce.
+      - name: The committed bundle is up to date
+        run: git diff --exit-code -- lib/client.js
+
+      # Byte equality is not reachable (docs/issues/17), so the artefact is
+      # judged on behaviour: 5460 probed calls against the committed bundle.
+      - name: The rebuild behaves like the committed bundle
+        run: npm run verify:bundle
