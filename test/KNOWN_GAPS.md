@@ -5,30 +5,40 @@
 
 新增测试时请顺手更新本文件；删掉一条时请在提交信息里说明它为什么不再成立。
 
-**最近一次复核**：已解决 4 条（凭据缓存链路、目录落盘、设置读回校验、CLI 入口），
-仍存在 3 条，其中 2 条是原理上不可测而非尚未动手。
+**最近一次复核**：已解决 5 条（凭据缓存链路、目录落盘、设置读回校验、CLI 入口、
+`toPiModel` 抽离），仍存在 3 条，其中 2 条是原理上不可测而非尚未动手。
+
+**第 3 条已部分解决**：客户端门控此前只由手抄副本守着，实测**抓不住任何东西**——
+从 `lib/client.js` 删掉那行 `promo.active !== true`（正是阻止卡片显示拿不到的折扣价
+的那一行），`model-row.test.js` 依然 9 pass / 0 fail。现已增加
+`test/client-bundle.test.js`，直接从产物文本里提取 `offPeakState` 及其依赖并执行，
+同一个变异会让它 3 条变红。根治仍取决于 `src/client/*.ts` 入库。
 
 ---
 
-## 1. `toPiModel` 与 `adapter.js` 的其余部分
+## 1. `adapter.js` 的 Cordis 接线与 profile 构造
 
 **位置**：`lib/adapter.js`
 
 **为什么没测**：模块顶层 import `@earendil-works/pi-ai` 与
 `@deepseek-ai/dsh-llm-pi-ai`，本仓库不安装 peer 依赖。
 
-**风险**：`toPiModel` 里那行 `compat: { supportsDeveloperRole: false }` 是整个插件
-最关键的一行——没有它，每个请求都会 403 `10605`，且 DSH 会无限重试。同一函数里
-还有「故意不声明 `maxTokens`」这个决定，理由同样充分（声明了会让长推理回复被截断，
-harness 报 `finish: max-tokens`）。这两处目前只有注释守着。
+**已经测到哪一步**：`toPiModel` 原先住在这里，是整个插件最关键也最无防护的函数——
+它那行 `compat: { supportsDeveloperRole: false }` 决定了每个请求会不会被 403
+`10605` 拒绝，而「故意不声明 `maxTokens`」决定了长推理回复会不会被截断成
+`finish: max-tokens`。两处此前都只有注释守着。现已抽出到 `lib/pi-model.js`
+（纯函数、不碰任何 pi-ai API）并由 `test/pi-model.test.js` 覆盖；
+它消费的 `rateNow` / `offPeakActive` / `offPeakRemaining` 早前已移到
+`lib/offpeak.js` 并被完整覆盖。
 
-**已经测到哪一步**：它消费的 `rateNow` / `offPeakActive` / `offPeakRemaining`
-已全部移到 `lib/offpeak.js` 并被完整覆盖。
+**剩下的**：`createQoderAdapter` 组装 `PiAiAdapter` profile 的那部分——provider
+注册、inert 认证平面、per-build 读设置（`preferMaximumContext` / `imageModeFor` /
+`enabledIdsFor`）以免改设置要重注册 adapter。这部分是接线，没有可断言的纯逻辑，
+留在原地是因为抽它出来只会造出一个只被调用一次的间接层。
 
-**要补上需要**：把 `toPiModel` 的输出构造（与 `PiAiAdapter` 无关的那部分）抽到
-无依赖模块，或用 `node --experimental-test-module-mocks` 桩掉 pi-ai
-（已验证可行：桩掉三个 `@deepseek-ai/*` 之后 `lib/index.js` 可以被 import）。
-后者更贴近真实调用，但要在 test script 上加 flag。
+**要补上需要**：`node --experimental-test-module-mocks` 桩掉 pi-ai 与
+`@deepseek-ai/*`（已验证可行：桩掉三个 `@deepseek-ai/*` 之后 `lib/index.js`
+可以被 import）。这要在 test script 上加 flag，且只在需要时开启。
 
 ---
 
@@ -55,22 +65,38 @@ harness 报 `finish: max-tokens`）。这两处目前只有注释守着。
 
 ## 3. 客户端卡片的门控表达式
 
-**状态**：**已知的、刻意接受的镜像**。`test/model-row.test.js` 里的
-`cardInstallsClock` 复刻了卡片 bundle 中的
-`models.some((m) => m.promotion?.active === true)`。
+**状态**：**已知的、刻意接受的镜像**，而且现在是**两个**。
+
+1. `test/model-row.test.js` 的 `cardInstallsClock` 复刻了卡片 bundle 中的
+   `models.some((m) => m.promotion?.active === true)`。
+2. 同文件的 `cardRendersOffPeak`（连同 `cardParseClock` / `cardLocalSecondsOf`）
+   复刻了 `offPeakState` 的**完整**判定——守卫加窗口算术——用来钉住卡片的错峰
+   门控与 host 端 `isOffPeakActive` 永远一致。
 
 **为什么无法 import**：卡片是浏览器 bundle，由 5 个从不提交的 TypeScript 源文件
 构建（`src/client/{paths,styles,settings-write,copy,index}.ts`）。仓库里没有任何
 构建配置能重新生成 `lib/client.js`。
 
-**同步约束**：卡片里那条表达式一旦改写，测试里的副本必须一起改，否则测试会在断言
+**同步约束**：卡片里那两条表达式一旦改写，测试里的副本必须一起改，否则测试会在断言
 一条没人实现的规则的同时保持绿色。
 
+**已经因此漏掉过一次**：`offPeakState` 原先只看窗口字段、不看 `promotion.active`，
+于是 Qoder 已下线但仍保留窗口字段的促销被按**折扣价**渲染——用户看到一个自己
+并不被收取的价格，而同一目录条目在模型选择器里经 `rateNow` 算出的却是
+`before` 价，两个界面自相矛盾。触发条件是目录里同时存在两种状态的模型：
+只要有任一模型 `active === true`，每秒时钟就会装上，此后**所有**行都走这条门控。
+修复是给 `offPeakState` 补上 `promo.active !== true` 的守卫（`lib/client.js`），
+并由 `cardRendersOffPeak` 与 host 端逐状态对拍。已用变异验证：抽掉守卫，
+`model-row.test.js` 3 条变红。
+
 这与本仓库其他测试曾犯的错是同一类（手抄副本），之所以接受，是因为
-「完全不覆盖」比「覆盖一个可能过期的副本」更糟——这个 bug 恰恰是在那一层发生的。
+「完全不覆盖」比「覆盖一个可能过期的副本」更糟——这两个 bug 都恰恰是在那一层
+发生的。
 
 **根治办法**：把 `src/client/*.ts` 纳入仓库，让 `lib/client.js` 成为可复现的构建
-产物。这是本文件里价值最高的一条待办，但工作量也最大。
+产物。这是本文件里价值最高的一条待办，但工作量也最大。在此之前，**往卡片上加
+任何 UI 判定逻辑之前，先想清楚它的 host 端对应物是什么**——两个界面算同一个数，
+就必须有两处测试。
 
 ---
 
@@ -116,6 +142,16 @@ harness 报 `finish: max-tokens`）。这两处目前只有注释守着。
 实测：删掉该行，`credential-cache.test.js` 全绿。
 
 保留它是为了可读性：显式清空比依赖「undefined 恰好不可用」更清楚。
+
+### 5c. `preferences.js` 的 `Object.hasOwn` 守卫
+
+`enabledIdsFor` / `imageModeFor` 用 `Object.hasOwn` 拒绝原型链上的键。但
+`Object.prototype` 上的值是函数或对象，`Array.isArray` 和模式白名单本来就拒绝它们，
+所以删掉 `hasOwn` 之后行为完全相同。实测：删掉两处 `hasOwn`，
+`preferences.test.js` 全绿。
+
+保留它是因为这个保证不该依赖 `Object.prototype` 的当前内容——某些 polyfill 会往
+`Object.prototype` 上加属性，那时过滤规则就可能放行。这是防御性加固，不是可观测行为。
 
 ---
 

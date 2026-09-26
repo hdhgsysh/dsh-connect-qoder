@@ -98,10 +98,17 @@ dsh plugin --profile web add <本仓库路径>
 | `lib/catalog-entry.js` | 目录条目的归一化、模型过滤与卡片行投影（无 peer 依赖） |
 | `lib/catalog-store.js` | 目录的磁盘缓存与原子落盘（无 peer 依赖） |
 | `lib/credential-cache.js` | 凭据缓存与「登录失效后重读」规则（无 peer 依赖） |
-| `lib/settings-save.js` | 设置写入与落盘校验（无 peer 依赖） |
+| `lib/settings-save.js` | 设置写入、按区域合并与落盘读回校验（无 peer 依赖） |
+| `lib/pi-model.js` | pi-ai 模型描述符的构造（纯函数，无 peer 依赖） |
+| `lib/preferences.js` | 三个设置项的读取与 volatile 解包（无 peer 依赖） |
 | `lib/offpeak.js` | 错峰窗口与费率算术（无 peer 依赖） |
 | `lib/errors.js` | 上游错误分类与「凭据是否过期」判定（无 peer 依赖） |
-| `lib/index.js` | 按区域注册 provider 的插件入口 |
+| `lib/index.js` | 按区域注册 provider 的插件入口与只读/保存路由 |
+
+`lib/client.js` 是例外：它是 esbuild 产物，源码（`src/client/*.ts`）不在本仓库，
+也没有 sourcemap 或构建脚本可以重新生成它。`test/client-bundle.test.js` 直接从
+这份产物里**提取并执行**卡片的关键纯函数，因此改产物会让测试变红——这是目前
+唯一能守住卡片代码的手段。
 
 ## 测试
 
@@ -122,7 +129,12 @@ PowerShell，这些在别的平台上行为不同。
 
 - `test/catalog-fields.test.js` 与 `test/model-row.test.js` —— 错峰机制曾因
   `promotion.active` / `promotion.timezone` 在 Host 投影时被丢掉而全程哑火，
-  而当时的测试是绿的，因为它测的是自己手抄的副本。
+  而当时的测试是绿的，因为它测的是自己手抄的副本。同一个毛病在客户端又犯过一次：
+  卡片自己算窗口时漏看 `promotion.active`，把**拿不到**的折扣价显示给用户，
+  而模型选择器按 `before` 价计费，两个界面自相矛盾。
+  `model-row.test.js` 现在逐状态对拍两个门控；`client-bundle.test.js` 更进一步，
+  直接从产物里提取卡片的 `offPeakState` 并执行——删掉那行门控会让它变红，
+  而只会让 `model-row.test.js` 保持绿色。**副本不是防线。**
 - `test/credential-cache.test.js` —— 「重新登录无需重启」这条卖点的完整链路：
   网关拒绝 → 谓词判定 → 置失效标志 → 下次请求重读。此前只有两端被测。
 - `test/credential-invalidation.test.js` —— 上面那条链路上的两个纯谓词。
@@ -130,7 +142,12 @@ PowerShell，这些在别的平台上行为不同。
   还是「排队等待」，两者弄反的代价完全不同。
 - `test/settings-save.test.js` —— DSH 0.1.7 上 `set()` 会静默成功而不落盘；
   这段代码用「写入→读回→深比较」把假成功变成显式失败，测试里直接模拟
-  「`mutate` 成功但文档没变」的那个场景。
+  「`mutate` 成功但文档没变」的那个场景。也钉住了两件靠肉眼会漏的事：
+  命名空间只做全等匹配（`llm-qoder-extra` 不算我们的），字段白名单用
+  `Object.hasOwn`（`constructor` 不是一个字段）。
+- `test/pi-model.test.js` —— `toPiModel` 抽离成纯函数后的直接覆盖：
+  `compat.supportsDeveloperRole: false` 与「不声明 `maxTokens`」这两处，
+  失效时每个请求都会 403，或长回复被截成 `finish: max-tokens`。
 - `test/catalog-store.test.js` —— 目录缓存的原子落盘，用真实临时目录跑，
   在 CI 所在的平台上实测 `rename` 覆盖行为，而不是在注释里假设。
 - `test/shim.test.js` —— 回环端点的鉴权与 `/v1/models` 过滤；对着真实
