@@ -124,6 +124,7 @@ dsh plugin --profile web add <本仓库路径>
 | `lib/pi-model.js` | pi-ai 模型描述符的构造（纯函数，无 peer 依赖） |
 | `lib/preferences.js` | 四个设置项的读取与 volatile 解包（`enabledRegions` 区域开关：缺失/非对象一律读作开启，只有显式 `false` 才关） |
 | `lib/offpeak.js` | 错峰窗口与费率算术（无 peer 依赖） |
+| `lib/single-flight.js` | 同类异步任务的并发合并：刷新在途时，后来的调用并入同一次请求（目录/用量刷新用，无 peer 依赖） |
 | `lib/errors.js` | 上游错误分类与「凭据是否过期」判定（无 peer 依赖） |
 | `lib/index.js` | 按区域注册 provider 的插件入口，与模型/用量/保存/账号状态路由（账号路由含「重读登录」的上线与回滚） |
 
