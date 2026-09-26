@@ -44,11 +44,17 @@ const RAW_ENTRY = {
   defaultContextWindow: 128000,
   contextOptions: [128000, 200000, 400000, 1000000],
   priceFactor: 0.01,
+  isFree: false,
+  isDefault: true,
   promotion: PROMOTION,
 }
 
 // A model without a discount block: `normalizePromotion` returns `undefined`.
 const RAW_ENTRY_BARE = { ...RAW_ENTRY, promotion: undefined }
+
+// A free model: `priceFactor` is 0 and `isFree` is true, so the picker
+// displays 免费 instead of x0.00.
+const RAW_ENTRY_FREE = { ...RAW_ENTRY, priceFactor: 0, isFree: true, isDefault: false, promotion: undefined }
 
 /**
  * Stand-in for `normalizeEntry`'s return object (lib/index.js:275-307).
@@ -70,6 +76,8 @@ function normalizeEntryMirror(entry) {
     defaultContextWindow: entry.defaultContextWindow ?? 0,
     contextOptions: Array.isArray(entry.contextOptions) ? entry.contextOptions : [],
     priceFactor: Number(entry.priceFactor) || 0,
+    isFree: entry.isFree === true,
+    isDefault: entry.isDefault === true,
     promotion: entry.promotion,
   }
 }
@@ -88,6 +96,8 @@ test('normalizeEntry carries the promotion block when upstream has one', () => {
   assert.strictEqual(entry.promotion.badge, '错峰')
   // The other catalog fields must survive too.
   assert.strictEqual(entry.priceFactor, 0.01)
+  assert.strictEqual(entry.isFree, false)
+  assert.strictEqual(entry.isDefault, true)
   assert.strictEqual(entry.defaultContextWindow, 128000)
   assert.deepStrictEqual(entry.contextOptions, [128000, 200000, 400000, 1000000])
   assert.strictEqual(entry.name, 'Qwen Coder')
@@ -95,5 +105,13 @@ test('normalizeEntry carries the promotion block when upstream has one', () => {
 
 test('normalizeEntry leaves promotion undefined for a bare model', () => {
   const entry = normalizeEntryMirror(RAW_ENTRY_BARE)
+  assert.strictEqual(entry.promotion, undefined)
+})
+
+test('normalizeEntry keeps isFree for a free model', () => {
+  const entry = normalizeEntryMirror(RAW_ENTRY_FREE)
+  assert.strictEqual(entry.isFree, true)
+  assert.strictEqual(entry.priceFactor, 0)
+  assert.strictEqual(entry.isDefault, false)
   assert.strictEqual(entry.promotion, undefined)
 })
