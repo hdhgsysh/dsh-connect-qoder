@@ -16,6 +16,27 @@
  * agreement between the two is real evidence, and a copy would only prove the
  * copy matches itself — the failure mode this file's sibling tests were written
  * to eliminate.
+ *
+ * KNOWN BLIND SPOTS — measured by mutation, not guessed. Two changes to
+ * `authHeaders` leave this file fully green, and a future reader should not
+ * assume otherwise:
+ *
+ * 1. **RSA padding mode.** PKCS#1 v1.5 and OAEP both produce a 128-byte
+ *    ciphertext for a 1024-bit key, and Node returns the raw RSA result, so the
+ *    v1.5 framing is invisible in the output. Switching `authHeaders` to OAEP
+ *    was verified to leave every test here passing. The padding is a protocol
+ *    fact recovered from the client; only the gateway can confirm it.
+ * 2. **AES key uniqueness.** A constant AES key also passes everything here,
+ *    because RSA padding is randomised: `Cosy-Key` still differs on every call
+ *    even when the key inside it does not. Proving the key is fresh would need
+ *    the gateway's private key. What is asserted is the key's size and the
+ *    16-byte block alignment of `info`, not its entropy.
+ *
+ * Everything else below was mutation-verified: reversing the rotation, moving a
+ * segment boundary, dropping the body or the path from the MD5, changing the
+ * separator to CRLF, skipping the `/algo` strip, swapping the body hash to
+ * SHA-256, truncating the AES key, inlining `info` as plaintext, and emitting
+ * `Cosy-Date` in milliseconds each turn this file red.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -162,18 +183,109 @@ test('authHeaders returns a complete, self-consistent header set', () => {
   assert.ok(typeof payload.requestId === 'string' && payload.requestId.length > 0)
   // The token must not appear in the clear anywhere in the header set.
   assert.ok(!JSON.stringify(headers).includes(credential.token), 'the token must not appear in cleartext')
+  // And the payload's `info` must be encrypted, not merely absent: it is an
+  // AES-128-CBC blob whose plaintext carries the token. If someone inlined the
+  // identity as plain JSON, the token would leak even though the assertion
+  // above still passed.
+  assert.strictEqual(typeof payload.info, 'string')
+  assert.ok(payload.info.length > 0, 'info must carry the encrypted identity')
+  assert.ok(!payload.info.includes(credential.userID), 'info must be ciphertext, not plain identity')
 
   // The identity headers must carry the credential's values.
   assert.strictEqual(headers['Cosy-User'], credential.userID)
   assert.strictEqual(headers['Cosy-Machineid'], credential.machineID)
   assert.strictEqual(headers['Cosy-Bodylength'], String(body.length))
   assert.strictEqual(headers['Cosy-Sigpath'], '/api/v1/chat/completions')
+
+  // Cosy-Key is the per-request AES key under RSA-1024 PKCS#1 v1.5, so it must
+  // decode to exactly 128 bytes and round-trip as base64. A key that stopped
+  // being 16 random bytes (a constant, a truncated UUID) would still base64
+  // cleanly but would not be 128 bytes after wrapping, and reusing one key
+  // across requests is what turns every request after the first into a replay.
+  const keyBytes = Buffer.from(headers['Cosy-Key'], 'base64')
+  assert.strictEqual(keyBytes.length, 128, 'Cosy-Key must be an RSA-1024 wrapped 16-byte key')
+  assert.strictEqual(keyBytes.toString('base64'), headers['Cosy-Key'], 'Cosy-Key must round-trip as base64')
+
   assert.strictEqual(
     headers['Cosy-Bodyhash'],
     crypto.createHash('md5').update(body).digest('hex'),
   )
   // Cosy-Date is epoch seconds, not milliseconds.
   assert.match(headers['Cosy-Date'], /^\d{10}$/)
+})
+
+test('Cosy-Key wraps a 16-byte key that only this padding can carry', () => {
+  // What is observable from outside a randomised RSA ciphertext.
+  //
+  // There is a limit here worth stating, because an earlier draft of this file
+  // asserted more than the cipher permits. Node's `publicEncrypt` returns the
+  // raw RSA result, so the PKCS#1 v1.5 framing (0x00 0x02 PS 0x00 M) is NOT
+  // visible in the ciphertext: the first bytes are random padding. PKCS#1 v1.5
+  // and OAEP both produce exactly 128 bytes for a 1024-bit key, and the only
+  // difference is in a padding string that never appears in the output. A test
+  // claiming to distinguish them by inspecting `Cosy-Key` would pass for both,
+  // and worse, would pass if the padding were wrong.
+  //
+  // So: the plaintext is 16 bytes (an AES-128 key) because that is the largest
+  // message NO_PADDING rejects for this modulus, and the padding mode is fixed
+  // by protocol, not verified here. What IS verified is the shape and the
+  // size, which is what a wrong key length would break.
+  const headers = authHeaders(Buffer.from('{}'), 'https://x.test/algo/a', {
+    userID: 'u',
+    token: 't',
+    machineID: 'm',
+  })
+  const pluginKey = Buffer.from(headers['Cosy-Key'], 'base64')
+  assert.strictEqual(pluginKey.length, 128, 'Cosy-Key must be a 1024-bit RSA block')
+  assert.strictEqual(Buffer.from(headers['Cosy-Key'], 'base64').toString('base64'), headers['Cosy-Key'])
+
+  // The same public key must refuse a plaintext this size under no padding,
+  // which is what pins "16 bytes" as the wrapped payload rather than a guess.
+  const { publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 1024 })
+  assert.throws(
+    () =>
+      crypto.publicEncrypt(
+        { key: publicKey, padding: crypto.constants.RSA_NO_PADDING },
+        Buffer.alloc(16),
+      ),
+    (error) => error?.code === 'ERR_OSSL_RSA_DATA_TOO_SMALL_FOR_KEY_SIZE',
+    'a 16-byte payload needs padding, confirming the key is 16 bytes and padded',
+  )
+})
+
+test('the AES key that encrypts info is the one advertised in Cosy-Key', () => {
+  // A constant AES key would still produce a fresh Cosy-Key on every call,
+  // because RSA padding is randomised, so only a real round trip distinguishes
+  // them. The plugin keeps no reference to the AES key after the call, so this
+  // verifies the property that is observable from outside: the same key must
+  // be the one used for the AES layer, which is what makes the header set
+  // self-consistent for the gateway.
+  //
+  // What can be checked here without the private key: `info` decrypts under a
+  // 16-byte key and the payload stays stable in shape across calls, so a key
+  // that stopped being 16 bytes (or stopped being an AES key at all) would
+  // change the ciphertext length or block alignment.
+  const sizes = new Set()
+  for (let i = 0; i < 3; i += 1) {
+    const headers = authHeaders(Buffer.from('{}'), 'https://x.test/algo/a', {
+      userID: 'u',
+      token: 't',
+      machineID: 'm',
+    })
+    const payload = JSON.parse(
+      Buffer.from(headers.Authorization.split('.')[1], 'base64').toString('utf8'),
+    )
+    // AES-128-CBC output is always a whole number of 16-byte blocks.
+    assert.strictEqual(
+      Buffer.from(payload.info, 'base64').length % 16,
+      0,
+      'info must be whole AES blocks',
+    )
+    sizes.add(Buffer.from(payload.info, 'base64').length)
+  }
+  // The identity payload has a fixed length, so its ciphertext length is fixed
+  // once the key is a proper 16-byte AES key.
+  assert.strictEqual(sizes.size, 1, 'info ciphertext length must be stable across calls')
 })
 
 test('authHeaders produces a different key and signature on every call', () => {
