@@ -29,6 +29,7 @@ import {
   mergeForShape,
   readField,
   SAVE_FIELDS,
+  settingsNamespaceOf,
   unwrapVolatile,
 } from '../lib/settings-save.js'
 
@@ -232,6 +233,37 @@ test('namespace resolution prefers the exact namespace over the provider name', 
   // And with only the second present, it is still found.
   assert.strictEqual(findSettingsRow([rows[0]], CANDIDATES).ns, 'llm-qoder')
   assert.strictEqual(findSettingsRow([], CANDIDATES), undefined)
+})
+
+test('the declared namespace comes from the Loader entry, not from the constant', () => {
+  // 0.1.7 keys the document by the Loader entry id, which for this bundle is
+  // `llm-qoder`. The models settings page resolves a provider's row by EXACT
+  // match on the namespace it declared, so declaring the constant here hides
+  // the whole Qoder group from that page while the plugin stays registered and
+  // answering — the failure this helper exists to prevent.
+  assert.strictEqual(settingsNamespaceOf({ fiber: { entry: { options: { id: 'llm-qoder' } } } }, 'dsh-connect-qoder'), 'llm-qoder')
+  // Whatever the host serves is declared verbatim: a Loader that namespaces
+  // bundles (`include:dsh-connect-workbuddy`) must be matched, not reformatted.
+  assert.strictEqual(
+    settingsNamespaceOf({ fiber: { entry: { options: { id: 'include:dsh-connect-qoder' } } } }, 'dsh-connect-qoder'),
+    'include:dsh-connect-qoder',
+  )
+})
+
+test('the fallback covers hosts that mount the plugin without a Loader entry', () => {
+  // `ctx.fiber.entry` is added by the Loader, not by Cordis: a test harness or
+  // a direct `ctx.plugin()` has none, and the plugin must still name itself.
+  for (const ctx of [
+    undefined,
+    {},
+    { fiber: {} },
+    { fiber: { entry: {} } },
+    { fiber: { entry: { options: {} } } },
+    { fiber: { entry: { options: { id: '' } } } },
+    { fiber: { entry: { options: { id: 42 } } } },
+  ]) {
+    assert.strictEqual(settingsNamespaceOf(ctx, 'dsh-connect-qoder'), 'dsh-connect-qoder', `${JSON.stringify(ctx)} must fall back`)
+  }
 })
 
 test('a volatile field is unwrapped on both the read and the read-back', async () => {

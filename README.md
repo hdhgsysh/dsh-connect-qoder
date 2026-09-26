@@ -95,6 +95,13 @@ dsh plugin --profile web add <本仓库路径>
   保留，重新勾选即恢复，无需重启 DSH；卡片模型列表与选择器用同一个
   `regionEnabledFor` 谓词过滤，两个界面不会打架。
 - 依赖 Qoder 客户端接口（非官方开放 API），Qoder 更新后插件可能需要随之调整。
+- **设置命名空间由宿主决定，不能自选**（0.1.7 起）：`describe()` 用 Loader 条目
+  id 作为 `ns`（本 bundle 是 `llm-qoder`，不是 `dsh-connect-qoder`），而「设置 → 模型」
+  页按**精确匹配**查 `namespaces.get(entry.settingsNs)`。若插件宣告的命名空间与宿主实际
+  服务的不一致，该 provider 会被判为「未配置」，**整行从页面上消失**——不报错、不灰显，
+  而插件本身仍在正常注册和应答，非常难查。因此 `settingsNs` 一律经
+  `settingsNamespaceOf(ctx)` 从 `ctx.fiber.entry.options.id` 推导，常量只作为宿主不暴露
+  条目 id 时的回落值（对齐 WorkBuddy 2.1.0 的同款修复）。
 - **设置保存走插件的 `__save` 主机端点 + 读回校验**（对齐 WorkBuddy 0.1.7 修复）：DSH 0.1.7 的
   客户端 `settingsScope.set()` 在原子写重试耗尽后会**静默返回成功而不落盘**，卡片改为「主机端点
   权威写、本地写仅作镜像、写后读回确认」，保存按钮只会显示真实结果。在宿主未为本插件注册设置
@@ -113,7 +120,7 @@ dsh plugin --profile web add <本仓库路径>
 | `lib/catalog-store.js` | 目录的磁盘缓存与原子落盘（无 peer 依赖） |
 | `lib/credential-cache.js` | 凭据缓存与「登录失效后重读」规则（无 peer 依赖） |
 | `lib/account-state.js` | 每区域账号状态四档判定（`ok` / `expired` / `needs-app` / `signed-out`；纯本地证据、不含凭据，无 peer 依赖） |
-| `lib/settings-save.js` | 设置写入、按区域合并与落盘读回校验（无 peer 依赖） |
+| `lib/settings-save.js` | 设置命名空间的解析（0.1.7 由宿主推导，插件不能自选）、设置写入、按区域合并与落盘读回校验（无 peer 依赖） |
 | `lib/pi-model.js` | pi-ai 模型描述符的构造（纯函数，无 peer 依赖） |
 | `lib/preferences.js` | 四个设置项的读取与 volatile 解包（`enabledRegions` 区域开关：缺失/非对象一律读作开启，只有显式 `false` 才关） |
 | `lib/offpeak.js` | 错峰窗口与费率算术（无 peer 依赖） |
