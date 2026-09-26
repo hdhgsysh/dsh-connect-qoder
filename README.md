@@ -56,7 +56,7 @@ Node 没有内置 DPAPI 绑定，这一步交给 PowerShell，并通过临时文
 在 DSH 的「插件市场」里粘贴这个源：
 
 ```
-github:hdhgsysh/dsh-connect-qoder
+github:eghrhegpe/dsh-connect-qoder
 ```
 
 或本地开发模式：
@@ -66,6 +66,10 @@ dsh plugin --profile web add <本仓库路径>
 ```
 
 安装后需要**重启 DSH 进程**：bundle 的 patch 在启动时读取。
+
+> 本仓库是 [hdhgsysh/dsh-connect-qoder](https://github.com/hdhgsysh/dsh-connect-qoder) 的 fork。
+> npm 上的 `dsh-connect-qoder` 由上游发布，**用包名装到的是上游那份**；要装本仓库这一份，
+> 请用上面的 `github:` 源。
 
 ## 凭据安全
 
