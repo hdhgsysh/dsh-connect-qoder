@@ -80,6 +80,15 @@ dsh plugin --profile web add <本仓库路径>
   一条可读的错误，而不是让用户看到一个空的助手回合。
 - **国际版额度**：国际版的试用额度可能已用尽（`isQuotaExceeded`），此时目录请求会返回
   403 `Login expired`，该区域就不会显示模型；国内版不受影响。
+- **账号状态四档与卡片重读**：插件入口读不出登录凭据的区域不注册 provider（启动日志会说
+  原因）。卡片顶部的「当前账号」面板把每个区域的状态摊开——`ok` / `expired`（本地凭据
+  已过期）/ `needs-app`（应用目录在但读不出凭据，并给出记录的失败原因）/ `signed-out`
+  （未装应用且未设 PAT）——身份行只带 name / email / 到期日，**不带任何凭据**（判定在
+  `lib/account-state.js`，纯本地证据、可注入可直测）。两个按钮各管一件事：「重读登录」
+  让宿主丢弃凭据缓存、重读应用存储，并把启动时未能上线的区域**现在就上线**（重建并重新
+  注册 adapter，失败时回滚到原注册，不影响已在服务的区域）——重新登录后不必再重启 DSH；
+  「在线确认」是账号流程里唯一的联网调用（`fetchUserInfo`），回答「上游现在还认不认
+  这个登录」，失败按 `classifyUpstreamError` 分档（`sign-in-expired` / 其他）。
 - 依赖 Qoder 客户端接口（非官方开放 API），Qoder 更新后插件可能需要随之调整。
 - **设置保存走插件的 `__save` 主机端点 + 读回校验**（对齐 WorkBuddy 0.1.7 修复）：DSH 0.1.7 的
   客户端 `settingsScope.set()` 在原子写重试耗尽后会**静默返回成功而不落盘**，卡片改为「主机端点
@@ -98,12 +107,13 @@ dsh plugin --profile web add <本仓库路径>
 | `lib/catalog-entry.js` | 目录条目的归一化、模型过滤与卡片行投影（无 peer 依赖） |
 | `lib/catalog-store.js` | 目录的磁盘缓存与原子落盘（无 peer 依赖） |
 | `lib/credential-cache.js` | 凭据缓存与「登录失效后重读」规则（无 peer 依赖） |
+| `lib/account-state.js` | 每区域账号状态四档判定（`ok` / `expired` / `needs-app` / `signed-out`；纯本地证据、不含凭据，无 peer 依赖） |
 | `lib/settings-save.js` | 设置写入、按区域合并与落盘读回校验（无 peer 依赖） |
 | `lib/pi-model.js` | pi-ai 模型描述符的构造（纯函数，无 peer 依赖） |
 | `lib/preferences.js` | 三个设置项的读取与 volatile 解包（无 peer 依赖） |
 | `lib/offpeak.js` | 错峰窗口与费率算术（无 peer 依赖） |
 | `lib/errors.js` | 上游错误分类与「凭据是否过期」判定（无 peer 依赖） |
-| `lib/index.js` | 按区域注册 provider 的插件入口与只读/保存路由 |
+| `lib/index.js` | 按区域注册 provider 的插件入口，与模型/用量/保存/账号状态路由（账号路由含「重读登录」的上线与回滚） |
 
 `lib/client.js` 是例外：它是 esbuild 产物，源码（`src/client/*.ts`）不在本仓库，
 也没有 sourcemap 或构建脚本可以重新生成它。`test/client-bundle.test.js` 直接从
@@ -138,6 +148,9 @@ PowerShell，这些在别的平台上行为不同。
 - `test/credential-cache.test.js` —— 「重新登录无需重启」这条卖点的完整链路：
   网关拒绝 → 谓词判定 → 置失效标志 → 下次请求重读。此前只有两端被测。
 - `test/credential-invalidation.test.js` —— 上面那条链路上的两个纯谓词。
+- `test/account-state.test.js` —— 账号状态四档判定（`lib/account-state.js`）：
+  全注入的存储读器 + 真实临时目录跑目录存在性检查，钉住「判定只信本地证据」
+  与「状态记录不含任何凭据材料」两条不变量。
 - `test/errors-classify.test.js` —— 105 与 10605 的优先级决定了「提示用户重新登录」
   还是「排队等待」，两者弄反的代价完全不同。
 - `test/settings-save.test.js` —— DSH 0.1.7 上 `set()` 会静默成功而不落盘；
