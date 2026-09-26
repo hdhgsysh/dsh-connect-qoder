@@ -4,21 +4,28 @@
  * Run: node --test test/catalog-fields.test.js
  *
  * This test exists because the `promotion` field was once dropped in
- * `normalizeEntry` (lib/index.js:274-307), making the entire off-peak
- * pricing machinery dead code: `toPiModel` and the settings card both saw
- * `promotion === undefined` and the window countdown, the `错峰` name suffix,
- * and the `before × discount` rate could never fire.
+ * `normalizeEntry`, making the entire off-peak pricing machinery dead code:
+ * `toPiModel` and the settings card both saw `promotion === undefined` and the
+ * window countdown, the `错峰` name suffix, and the `before × discount` rate
+ * could never fire.
  *
- * The fixture mirrors the real upstream shape: `fetchModels` (lib/upstream.js)
- * builds the entry, `normalizePromotion` (lib/upstream.js:625-651) builds the
- * `promotion` block, and `normalizeEntry` (lib/index.js:275-307) maps both.
+ * It imports the real `normalizeEntry` (lib/catalog-entry.js). It used to keep
+ * a hand-written MIRROR of that function and assert against the mirror, which
+ * is why the same class of bug got through a second time: the host projection in
+ * `lib/index.js` dropped `promotion.active` and `promotion.timezone`, the card's
+ * clock gate `promotion?.active === true` was therefore permanently false, and
+ * the interval was never installed — so the 22:00 rate flip still never
+ * happened, while this test stayed green throughout. A mirror asserts that the
+ * copy is correct; only an import can assert that the code is.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
+import { normalizeEntry } from '../lib/catalog-entry.js'
+
 // A raw catalog row as `fetchModels` pushes it into `models[]`
-// (lib/upstream.js:592-607), with the `promotion` block already shaped by
-// `normalizePromotion` — the fields adapter.js consumes verbatim:
+// (lib/upstream.js), with the `promotion` block already shaped by
+// `normalizePromotion` — the fields adapter.js and the card consume:
 //   active, windowStart, windowEnd, timezone,
 //   discountFactor, beforePromotionPriceFactor, badge, description
 const PROMOTION = {
@@ -56,34 +63,8 @@ const RAW_ENTRY_BARE = { ...RAW_ENTRY, promotion: undefined }
 // displays 免费 instead of x0.00.
 const RAW_ENTRY_FREE = { ...RAW_ENTRY, priceFactor: 0, isFree: true, isDefault: false, promotion: undefined }
 
-/**
- * Stand-in for `normalizeEntry`'s return object (lib/index.js:275-307).
- * The fix added `promotion: entry.promotion`; this mirror must stay in
- * lockstep with the real function.
- */
-function normalizeEntryMirror(entry) {
-  const name = entry.name ?? entry.key ?? 'QoderModel'
-  return {
-    id: name.replace(/\s+/g, ''),
-    key: entry.key,
-    name,
-    isVL: entry.isVL === true,
-    isReasoning: entry.isReasoning === true,
-    supportsEffort: entry.supportsEffort === true,
-    alwaysThinking: entry.alwaysThinking === true,
-    effortLevels: Array.isArray(entry.effortLevels) ? entry.effortLevels : [],
-    maxInputTokens: entry.maxInputTokens ?? 0,
-    defaultContextWindow: entry.defaultContextWindow ?? 0,
-    contextOptions: Array.isArray(entry.contextOptions) ? entry.contextOptions : [],
-    priceFactor: Number(entry.priceFactor) || 0,
-    isFree: entry.isFree === true,
-    isDefault: entry.isDefault === true,
-    promotion: entry.promotion,
-  }
-}
-
 test('normalizeEntry carries the promotion block when upstream has one', () => {
-  const entry = normalizeEntryMirror(RAW_ENTRY)
+  const entry = normalizeEntry(RAW_ENTRY)
   assert.ok(
     entry.promotion !== undefined,
     'promotion field was dropped by normalizeEntry — off-peak pricing is dead code',
@@ -104,14 +85,27 @@ test('normalizeEntry carries the promotion block when upstream has one', () => {
 })
 
 test('normalizeEntry leaves promotion undefined for a bare model', () => {
-  const entry = normalizeEntryMirror(RAW_ENTRY_BARE)
+  const entry = normalizeEntry(RAW_ENTRY_BARE)
   assert.strictEqual(entry.promotion, undefined)
 })
 
 test('normalizeEntry keeps isFree for a free model', () => {
-  const entry = normalizeEntryMirror(RAW_ENTRY_FREE)
+  const entry = normalizeEntry(RAW_ENTRY_FREE)
   assert.strictEqual(entry.isFree, true)
   assert.strictEqual(entry.priceFactor, 0)
   assert.strictEqual(entry.isDefault, false)
   assert.strictEqual(entry.promotion, undefined)
+})
+
+test('normalizeEntry passes the promotion block through by reference, unfiltered', () => {
+  // The regression this file exists for happened twice, and the second time the
+  // block survived while two of its fields did not. Asserting on the whole block
+  // — rather than the handful of fields this test happened to check — is what
+  // makes a third variant fail loudly instead of quietly.
+  const entry = normalizeEntry(RAW_ENTRY)
+  assert.deepStrictEqual(
+    Object.keys(entry.promotion).sort(),
+    Object.keys(PROMOTION).sort(),
+    'normalizeEntry must carry every promotion field through verbatim',
+  )
 })
