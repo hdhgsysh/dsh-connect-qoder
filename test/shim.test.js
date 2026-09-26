@@ -61,7 +61,7 @@ const CATALOG = [
  *   distinction is carried by a separate flag, because a destructuring default
  *   cannot tell "omitted" from "explicitly undefined".
  */
-async function startShim({ stream, enabledIds = [], credential, signedOut = false } = {}) {
+async function startShim({ stream, enabledIds = [], credential, signedOut = false, runChat } = {}) {
   const seen = { requests: [], invalidations: 0, models: [] }
   // `signedOut` is a separate flag because a destructuring default cannot tell
   // "omitted" from "explicitly undefined", and both mean something different
@@ -78,6 +78,7 @@ async function startShim({ stream, enabledIds = [], credential, signedOut = fals
       seen.invalidations += 1
     },
     logger: { warn() {} },
+    ...(runChat === undefined ? {} : { runChat }),
   })
   await shim.ready
   seen.shim = shim
@@ -104,7 +105,7 @@ async function call(base, pathname, { method = 'GET', token, headers = {}, body 
   } catch {
     json = undefined
   }
-  return { status: response.status, json, text }
+  return { status: response.status, json, text, headers: Object.fromEntries(response.headers) }
 }
 
 let shim
@@ -332,5 +333,79 @@ test('the base URL and token are per instance', async () => {
     assert.strictEqual(status, 401)
   } finally {
     await other.shim.close()
+  }
+})
+
+/** An upstream whose very first pull fails, before any status is committed. */
+function upstreamFails(error) {
+  return () => {
+    throw error
+  }
+}
+
+/** POST one chat completion, returning status, body and response headers. */
+async function postChat(instance, extra = {}) {
+  return call(instance.base, '/v1/chat/completions', {
+    method: 'POST',
+    token: instance.token,
+    body: JSON.stringify({ model: 'ModelA', messages: [], ...extra }),
+  })
+}
+
+test('a queued upstream answers 503 carrying the gateway Retry-After hint', async () => {
+  // The gateway's queue hint used to die at the shim: the 503 was right but
+  // headerless, so the host — which DOES parse an HTTP Retry-After, capped at
+  // 20 s — fell back to a blind backoff instead of the window Qoder asked for.
+  // The number must survive the translation, clamped to what the host will
+  // believe.
+  const queued = await startShim({
+    runChat: upstreamFails(Object.assign(new Error('Qoder is busy'), { retryable: true, retryAfterSeconds: 47 })),
+  })
+  try {
+    const { status, json, headers } = await postChat(queued)
+    assert.strictEqual(status, 503)
+    assert.strictEqual(json.error.code, 'rate_limit')
+    assert.strictEqual(headers['retry-after'], '20', 'a hint past the host cap must advertise the cap')
+  } finally {
+    await queued.shim.close()
+  }
+})
+
+test('a short queue hint is forwarded verbatim, and a hintless one is omitted', async () => {
+  const cases = [
+    { retryAfterSeconds: 3, expected: '3' },
+    { retryAfterSeconds: 0.4, expected: '1', why: 'a sub-second hint must not round to 0' },
+    { retryAfterSeconds: undefined, expected: undefined },
+  ]
+  for (const { retryAfterSeconds, expected } of cases) {
+    const error = Object.assign(new Error('queued'), { retryable: true, retryAfterSeconds })
+    const instance = await startShim({ runChat: upstreamFails(error) })
+    try {
+      const { status, headers } = await postChat(instance)
+      assert.strictEqual(status, 503)
+      assert.strictEqual(
+        headers['retry-after'],
+        expected,
+        `retryAfterSeconds=${String(retryAfterSeconds)} must yield Retry-After ${String(expected)}`,
+      )
+    } finally {
+      await instance.shim.close()
+    }
+  }
+})
+
+test('a hard upstream failure is a 502 and advertises no retry delay', async () => {
+  // Only a *retryable* failure may tell the host when to come back; putting a
+  // Retry-After on a hard failure would schedule a retry that cannot succeed.
+  const broken = await startShim({
+    runChat: upstreamFails(Object.assign(new Error('gateway exploded'), { retryAfterSeconds: 30 })),
+  })
+  try {
+    const { status, json, headers } = await postChat(broken)
+    assert.strictEqual(status, 502)
+    assert.strictEqual(json.error.code, 'upstream_error')
+    assert.strictEqual(headers['retry-after'], undefined)
+  } finally {
+    await broken.shim.close()
   }
 })
