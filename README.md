@@ -31,11 +31,13 @@ Qoder 不是 OpenAI 兼容端点，所以需要三样东西：
 ## 凭据来源
 
 插件复用 Qoder 桌面应用自己的登录状态，**不启动额外的 OAuth 流程，也不写入应用的文件**
-（数据库以只读方式打开）。
+（凭据文件以只读方式打开）。
 
-Qoder 把登录信息放在 VS Code 风格的 `state.vscdb` 里，密文是 Chromium OSCrypt 格式
-（`v10` + nonce + 密文 + tag，AES-256-GCM）。解密用的密钥保存在应用的 `Local State` 中，
-由操作系统 keystore 包裹 —— Windows 上是当前用户作用域的 DPAPI，因此同一用户下的进程都能解开它。
+Qoder 把登录信息放在 Chromium OSCrypt 格式的凭据文件里（`v10` + nonce + 密文 + tag，AES-256-GCM）。
+新版（0.3.x）的凭据直接保存在 `<userData>/auth.v1.dat`，旧版（0.2.x 及更早）则放在
+VS Code 风格的 `state.vscdb` SQLite 数据库里。两种布局都支持，新版优先尝试。
+密文用的密钥保存在应用的 `Local State` 中，由操作系统 keystore 包裹 —— Windows 上是当前用户
+作用域的 DPAPI，因此同一用户下的进程都能解开它。
 Node 没有内置 DPAPI 绑定，这一步交给 PowerShell，并通过临时文件交换结果（不使用管道），
 这样在禁止管道 stdio 的沙箱里同样可用。
 
@@ -64,8 +66,8 @@ dsh plugin --profile web add <本仓库路径>
 
 插件**不存储任何凭据**：
 
-- 复用本机已登录的 Qoder 桌面应用的本地数据库（只读打开，临时副本在 `os.tmpdir()`），
-  关闭后立即删除。
+- 复用本机已登录的 Qoder 桌面应用的凭据文件（新版 `auth.v1.dat` / 旧版 `state.vscdb`，
+  均以只读方式打开，不做任何写入）。
 - 进程内随机 bearer token 绑定 loopback 端口；Qoder 真实的 RSA 包装 key 与 session key
   不会离开本插件的沙箱。
 
