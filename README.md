@@ -96,6 +96,8 @@ dsh plugin --profile web add <本仓库路径>
 | `lib/shim.js` | 面向 pi-ai 的 OpenAI 兼容回环端点 |
 | `lib/adapter.js` | pi-ai provider 与 `PiAiAdapter` profile |
 | `lib/catalog-entry.js` | 目录条目的归一化、模型过滤与卡片行投影（无 peer 依赖） |
+| `lib/catalog-store.js` | 目录的磁盘缓存与原子落盘（无 peer 依赖） |
+| `lib/credential-cache.js` | 凭据缓存与「登录失效后重读」规则（无 peer 依赖） |
 | `lib/offpeak.js` | 错峰窗口与费率算术（无 peer 依赖） |
 | `lib/errors.js` | 上游错误分类与「凭据是否过期」判定（无 peer 依赖） |
 | `lib/index.js` | 按区域注册 provider 的插件入口 |
@@ -103,10 +105,15 @@ dsh plugin --profile web add <本仓库路径>
 ## 测试
 
 ```sh
-npm test        # 等价于 node --test "test/*.test.js"
+npm test             # node --test "test/*.test.js"
+npm run test:coverage   # 同上，加 --experimental-test-coverage
 ```
 
-测试只用 Node 内置的 `node:test`，不需要安装任何依赖——**但也不需要安装 peer 依赖**，
+CI 在 Node 22.19 / 24 × Ubuntu / Windows 上跑（`.github/workflows/test.yml`）——
+Windows 不是冗余：shim 绑定回环监听、目录缓存依赖 rename 覆盖、凭据读取要调
+PowerShell，这些在别的平台上行为不同。
+
+测试只用 Node 内置的 `node:test`，不需要安装任何依赖——**也不需要安装 peer 依赖**，
 这是刻意的：`lib/` 中凡是纯逻辑的部分都放在无 peer 依赖的模块里（见上表），
 这样它们才能被直接 import 并断言真实的实现，而不是在测试里手抄一份。
 
@@ -115,19 +122,24 @@ npm test        # 等价于 node --test "test/*.test.js"
 - `test/catalog-fields.test.js` 与 `test/model-row.test.js` —— 错峰机制曾因
   `promotion.active` / `promotion.timezone` 在 Host 投影时被丢掉而全程哑火，
   而当时的测试是绿的，因为它测的是自己手抄的副本。
-- `test/credential-invalidation.test.js` —— 同上：把 `lib/shim.js` 里的检测
-  正则改坏，该测试依然全绿。
+- `test/credential-cache.test.js` —— 「重新登录无需重启」这条卖点的完整链路：
+  网关拒绝 → 谓词判定 → 置失效标志 → 下次请求重读。此前只有两端被测。
+- `test/credential-invalidation.test.js` —— 上面那条链路上的两个纯谓词。
 - `test/errors-classify.test.js` —— 105 与 10605 的优先级决定了「提示用户重新登录」
   还是「排队等待」，两者弄反的代价完全不同。
-- `test/shim.test.js` —— 回环端点的鉴权与 `/v1/models` 过滤；这里对着真实
+- `test/catalog-store.test.js` —— 目录缓存的原子落盘，用真实临时目录跑，
+  在 CI 所在的平台上实测 `rename` 覆盖行为，而不是在注释里假设。
+- `test/shim.test.js` —— 回环端点的鉴权与 `/v1/models` 过滤；对着真实
   HTTP 服务器说话，Host 头用裸 socket 发送（`fetch` 禁止设置该头）。
-- `test/upstream-protocol.test.js` —— 编码与签名。这两个盲区是**原理上不可测**的，
-  已在文件头写明：RSA 的 PKCS#1 v1.5 与 OAEP 无法从密文区分；常量化的 AES key
-  仍会每次产生不同的 `Cosy-Key`（padding 随机）。
+- `test/oscrypt.test.js` —— 凭据解密往返；夹具用真实 AES-256-GCM 构造，
+  key 是固定哈希，失败可复现。
+- `test/upstream-protocol.test.js` —— 编码与签名。两个盲区是**原理上不可测**的，
+  已在文件头写明。
 - `test/upstream-messages.test.js` —— 消息与工具调用翻译，注释里自称
   「最重要的一件事」，此前零覆盖。
 
-尚未覆盖的部分写在各测试文件的头部，而不是假装已经覆盖。
+尚未覆盖的部分集中登记在 `test/KNOWN_GAPS.md`，不在各文件里重复叙述——
+重复三处正是「手抄副本」那类问题的文档版。
 
 ## 免责声明
 
