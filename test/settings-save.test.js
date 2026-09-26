@@ -97,6 +97,43 @@ test('a write that silently does not land is reported as a FAILURE', async () =>
   assert.deepStrictEqual(result.body.readBack, { Old: 'on' })
 })
 
+test('an inherited property name is not a writable field', async () => {
+  // `SAVE_FIELDS[field]` reaches the prototype chain, so `constructor`,
+  // `toString`, `__proto__` and friends all yield something that is not
+  // `undefined` — they sail past a `=== undefined` guard and go straight into
+  // `settings.mutate` and the preferences assign. The lookup must be an own-
+  // property check.
+  for (const field of ['constructor', 'toString', 'valueOf', '__proto__', 'hasOwnProperty', 'isPrototypeOf']) {
+    const settings = makeSettings()
+    const result = await save(settings, field, { anything: true })
+    assert.strictEqual(result.status, 400, `${field} must not be accepted as a field`)
+    assert.strictEqual(settings.mutations.length, 0, `${field} must not be written to the document`)
+  }
+  // And a field that is not a string at all.
+  for (const field of [null, undefined, 0, [], {}]) {
+    const settings = makeSettings()
+    const result = await save(settings, field, 'x')
+    assert.strictEqual(result.status, 400)
+    assert.strictEqual(settings.mutations.length, 0)
+  }
+})
+
+test('a field that exists only on the prototype is reported as unknown', () => {
+  // The error message itself is built from `Object.keys`, which is already
+  // own-properties-only, so it cannot leak the prototype's members.
+  assert.deepStrictEqual(Object.keys(SAVE_FIELDS), [
+    'enabledModelIds',
+    'imageOverrides',
+    'useMaximumContextWindow',
+  ])
+  for (const inherited of ['constructor', 'toString', '__proto__']) {
+    assert.ok(
+      !Object.keys(SAVE_FIELDS).includes(inherited),
+      `${inherited} must not appear in the whitelist`,
+    )
+  }
+})
+
 test('a write that lands on a DIFFERENT value than intended is caught', async () => {
   // Not just "nothing happened": a host that stored something other than what
   // was asked for must also fail. A loose comparison — say, comparing only the
@@ -131,6 +168,30 @@ test('an unknown field is a 400 and touches nothing', async () => {
   assert.strictEqual(result.status, 400)
   assert.match(result.body.error, /field must be one of/)
   assert.strictEqual(settings.mutations.length, 0, 'an unknown field must not be written')
+})
+
+test('an inherited Object key is not a field, however much it looks like one', async () => {
+  // The guard is an own-property check, not `SAVE_FIELDS[field] === undefined`.
+  // A plain lookup walks the prototype chain, so `constructor` resolves to a
+  // function — never `undefined` — and sails straight through into `mutate`.
+  for (const field of ['constructor', 'toString', 'hasOwnProperty', 'valueOf', '__proto__', 'isPrototypeOf']) {
+    const settings = makeSettings()
+    const result = await save(settings, field, { M: 'on' })
+    assert.strictEqual(result.status, 400, `"${field}" must be refused as a field name`)
+    assert.match(result.body.error, /field must be one of/)
+    assert.strictEqual(settings.mutations.length, 0, `"${field}" must not reach settings.mutate`)
+  }
+})
+
+test('a non-string field name is refused rather than coerced', async () => {
+  // `body.field` arrives from JSON, so it can be any JSON value. An array or a
+  // number must not index into the whitelist.
+  for (const field of [undefined, null, 0, 1, true, ['imageOverrides'], { toString: () => 'imageOverrides' }]) {
+    const settings = makeSettings()
+    const result = await save(settings, field, { M: 'on' })
+    assert.strictEqual(result.status, 400, `${JSON.stringify(field)} must not be treated as a field`)
+    assert.strictEqual(settings.mutations.length, 0)
+  }
 })
 
 test('a missing namespace is a 503 naming what was available', async () => {
