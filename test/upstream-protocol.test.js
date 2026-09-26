@@ -44,9 +44,13 @@ import crypto from 'node:crypto'
 
 import {
   CUSTOM_ALPHABET,
+  QUEUE_WAIT_BUDGET_MS,
+  QUEUE_WAIT_MAX_SLEEP_MS,
+  QUEUE_WAIT_MIN_SLEEP_MS,
   STD_ALPHABET,
   authHeaders,
   encodeBody,
+  queueWaitFor,
   signaturePath,
 } from '../lib/upstream.js'
 
@@ -329,4 +333,58 @@ test('authHeaders omits a body when none is supplied', () => {
   })
   assert.strictEqual(headers['Cosy-Bodylength'], '0')
   assert.match(headers.Authorization, /^Bearer COSY\.[^.]+\.[0-9a-f]{32}$/)
+})
+
+/**
+ * The queue-wait budget: a promise that a queued turn stops waiting — and
+ * keeps that promise — once `QUEUE_WAIT_BUDGET_MS` of waiting has been spent.
+ *
+ * The regression these pin: the clamp was once `Math.max(MIN, Math.min(target,
+ * MAX, remaining))`, which puts the floor OUTSIDE the budget cap — so with any
+ * budget below MIN_SLEEP the function returned MIN_SLEEP anyway and overshot,
+ * silently, in a term of code that read as if it capped. The old shape failed
+ * the sweep below with "waited N ms past the budget".
+ */
+const QUEUED = { retryable: true, retryAfterSeconds: 5 }
+
+test('a queue sleep never exceeds what is left of the budget', () => {
+  // Sweep the whole tail of the budget, not just obvious points: the old bug
+  // was a cliff BELOW MIN_SLEEP, so every `remaining` under 1000 matters, and
+  // the sweep (step 7 ms) catches whatever the boundary arithmetic gets wrong.
+  const failures = []
+  for (let waitedMs = 0; waitedMs < QUEUE_WAIT_BUDGET_MS; waitedMs += 7) {
+    const remaining = QUEUE_WAIT_BUDGET_MS - waitedMs
+    const slept = queueWaitFor(QUEUED, waitedMs, 1)
+    if (slept === undefined) {
+      failures.push(`waitedMs=${waitedMs}: stopped early, budget had ${remaining} left`)
+    } else if (slept > remaining) {
+      failures.push(`waitedMs=${waitedMs}: slept ${slept}, overshoot ${slept - remaining}`)
+    }
+  }
+  assert.deepEqual(failures, [])
+})
+
+test('an exhausted budget, or a non-retryable error, ends the wait', () => {
+  assert.equal(queueWaitFor(QUEUED, QUEUE_WAIT_BUDGET_MS, 1), undefined)
+  assert.equal(queueWaitFor(QUEUED, QUEUE_WAIT_BUDGET_MS + 1, 9), undefined)
+  assert.equal(queueWaitFor({ retryable: false, retryAfterSeconds: 5 }, 0, 1), undefined)
+  assert.equal(queueWaitFor(undefined, 0, 1), undefined)
+})
+
+test('mid-budget sleeps stay inside the retry policy band', () => {
+  // Plenty of budget left: a hint below MIN_SLEEP is floored up, a ridiculous
+  // one is capped at MAX_SLEEP, and neither can leak outside [MIN, MAX].
+  const small = queueWaitFor({ retryable: true, retryAfterSeconds: 0.01 }, 0, 1)
+  assert.ok(small >= QUEUE_WAIT_MIN_SLEEP_MS && small <= QUEUE_WAIT_MAX_SLEEP_MS, `got ${small}`)
+  const huge = queueWaitFor({ retryable: true, retryAfterSeconds: 3600 }, 0, 1)
+  assert.equal(huge, QUEUE_WAIT_MAX_SLEEP_MS)
+  // Past the grace attempts the escalation takes over from a small hint — but
+  // still capped, and still inside the budget.
+  const escalated = queueWaitFor({ retryable: true, retryAfterSeconds: 1 }, 0, 12)
+  assert.equal(escalated, QUEUE_WAIT_MAX_SLEEP_MS)
+  // Jitter must actually vary, or "randomized retry" is a lie: the hinted case
+  // spans hint*(0.75..1.25), so 200 draws must not land on one value.
+  const seen = new Set()
+  for (let i = 0; i < 200; i++) seen.add(queueWaitFor({ retryable: true, retryAfterSeconds: 20 }, 0, 1))
+  assert.ok(seen.size > 5, `jitter produced ${seen.size} distinct waits`)
 })
