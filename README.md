@@ -31,16 +31,23 @@ Qoder 不是 OpenAI 兼容端点，所以需要三样东西：
 ## 凭据来源
 
 插件复用 Qoder 桌面应用自己的登录状态，**不启动额外的 OAuth 流程，也不写入应用的文件**
-（数据库以只读方式打开）。
+（凭据文件以只读方式打开）。
 
-Qoder 把登录信息放在 VS Code 风格的 `state.vscdb` 里，密文是 Chromium OSCrypt 格式
-（`v10` + nonce + 密文 + tag，AES-256-GCM）。解密用的密钥保存在应用的 `Local State` 中，
-由操作系统 keystore 包裹 —— Windows 上是当前用户作用域的 DPAPI，因此同一用户下的进程都能解开它。
+Qoder 把登录信息放在 Chromium OSCrypt 格式的凭据文件里（`v10` + nonce + 密文 + tag，AES-256-GCM）。
+新版（0.3.x）的凭据直接保存在 `<userData>/auth.v1.dat`，旧版（0.2.x 及更早）则放在
+VS Code 风格的 `state.vscdb` SQLite 数据库里。两种布局都支持，新版优先尝试。
+密文用的密钥保存在应用的 `Local State` 中，由操作系统 keystore 包裹 —— Windows 上是当前用户
+作用域的 DPAPI，因此同一用户下的进程都能解开它。
 Node 没有内置 DPAPI 绑定，这一步交给 PowerShell，并通过临时文件交换结果（不使用管道），
 这样在禁止管道 stdio 的沙箱里同样可用。
 
 没有桌面应用登录时，可以用官方文档的 **PAT** 兜底：设置 `QODERCN_PAT`（国内版）或
 `QODER_PAT`（国际版），插件会用它换取 job token。
+
+**平台边界：零配置路径只在 Windows 成立。** 解密链路是 PowerShell + DPAPI（`Crypt32.dll`），
+`lib/` 里没有任何 macOS / Linux 分支——在其它平台上应用凭据永远探测不到（`loadCredential`
+返回 `undefined`，该区域不注册），只剩上面的 PAT 兜底。CI 的 Ubuntu 绿灯说明**测试**在那边
+能跑，不等于零配置在 Linux 上存在。
 
 ## 安装
 
@@ -64,8 +71,8 @@ dsh plugin --profile web add <本仓库路径>
 
 插件**不存储任何凭据**：
 
-- 复用本机已登录的 Qoder 桌面应用的本地数据库（只读打开，临时副本在 `os.tmpdir()`），
-  关闭后立即删除。
+- 复用本机已登录的 Qoder 桌面应用的凭据文件（新版 `auth.v1.dat` / 旧版 `state.vscdb`，
+  均以只读方式打开，不做任何写入）。
 - 进程内随机 bearer token 绑定 loopback 端口；Qoder 真实的 RSA 包装 key 与 session key
   不会离开本插件的沙箱。
 
@@ -78,7 +85,35 @@ dsh plugin --profile web add <本仓库路径>
   一条可读的错误，而不是让用户看到一个空的助手回合。
 - **国际版额度**：国际版的试用额度可能已用尽（`isQuotaExceeded`），此时目录请求会返回
   403 `Login expired`，该区域就不会显示模型；国内版不受影响。
+- **账号状态四档与卡片重读**：插件入口读不出登录凭据的区域不注册 provider（启动日志会说
+  原因）。卡片顶部的「当前账号」面板收敛成**版本条**（对齐 WorkBuddy 的 tab 条）：每个
+  区域一个胶囊——状态点（`ok` 绿 / `expired` 红 / `needs-app` 琥珀 / `signed-out` 中性）+
+  区域名 +「模型」开关；点哪个胶囊，账号详情、用量与模型列表都只看那一版，区域名因此
+  在卡片上只出现一次（模型行的区域 badge 已随之移除）。身份详情只带 name / email /
+  到期日，**不带任何凭据**（判定在 `lib/account-state.js`，纯本地证据、可注入可直测）。
+  两个按钮各管一件事：「重读登录」
+  让宿主丢弃凭据缓存、重读应用存储，并把启动时未能上线的区域**现在就上线**（重建并重新
+  注册 adapter，失败时回滚到原注册，不影响已在服务的区域）——重新登录后不必再重启 DSH；
+  「在线确认」是账号流程里唯一的联网调用（`fetchUserInfo`），回答「上游现在还认不认
+  这个登录」，失败按 `classifyUpstreamError` 分档（`sign-in-expired` / 其他）。
+- **每一版的模型可以单独关掉**（`enabledRegions`，版本条上的「模型」开关，对齐
+  WorkBuddy 的 per-tab 供应商开关）：取消勾选的一版向 DSH 提供**零个模型**，它的
+  模型组按「空目录即隐藏」的同一条规则从选择器消失，但登录、用量与模型筛选全部
+  保留，重新勾选即恢复，无需重启 DSH；卡片模型列表与选择器用同一个
+  `regionEnabledFor` 谓词过滤，两个界面不会打架。
 - 依赖 Qoder 客户端接口（非官方开放 API），Qoder 更新后插件可能需要随之调整。
+- **设置命名空间由宿主决定，不能自选**（0.1.7 起）：`describe()` 用 Loader 条目
+  id 作为 `ns`（本 bundle 是 `llm-qoder`，不是 `dsh-connect-qoder`），而「设置 → 模型」
+  页按**精确匹配**查 `namespaces.get(entry.settingsNs)`。若插件宣告的命名空间与宿主实际
+  服务的不一致，该 provider 会被判为「未配置」，**整行从页面上消失**——不报错、不灰显，
+  而插件本身仍在正常注册和应答，非常难查。因此 `settingsNs` 一律经
+  `settingsNamespaceOf(ctx)` 从 `ctx.fiber.entry.options.id` 推导，常量只作为宿主不暴露
+  条目 id 时的回落值（对齐 WorkBuddy 2.1.0 的同款修复）。
+- **设置保存走插件的 `__save` 主机端点 + 读回校验**（对齐 WorkBuddy 0.1.7 修复）：DSH 0.1.7 的
+  客户端 `settingsScope.set()` 在原子写重试耗尽后会**静默返回成功而不落盘**，卡片改为「主机端点
+  权威写、本地写仅作镜像、写后读回确认」，保存按钮只会显示真实结果。在宿主未为本插件注册设置
+  命名空间行的环境（如 `link:` 开发安装）下端点会 503，卡片如实显示失败而不是假"已保存"；
+  正式（registry）安装下该端点可用。
 
 ## 目录
 
@@ -87,8 +122,86 @@ dsh plugin --profile web add <本仓库路径>
 | `lib/credentials.js` | 从 Qoder 应用读取并解密登录凭据 |
 | `lib/upstream.js` | COSY 签名、请求体编码、目录与对话流 |
 | `lib/shim.js` | 面向 pi-ai 的 OpenAI 兼容回环端点 |
-| `lib/adapter.js` | pi-ai provider 与 `PiAiAdapter` profile |
-| `lib/index.js` | 按区域注册 provider 的插件入口 |
+| `lib/adapter.js` | pi-ai provider 与 `PiAiAdapter` profile（被关的 provider 以零模型组呈现，由 DSH 自行隐藏） |
+| `lib/catalog-entry.js` | 目录条目的归一化、模型过滤（含按区域开关）与卡片行投影（无 peer 依赖） |
+| `lib/catalog-store.js` | 目录的磁盘缓存与原子落盘（无 peer 依赖） |
+| `lib/credential-cache.js` | 凭据缓存与「登录失效后重读」规则（无 peer 依赖） |
+| `lib/account-state.js` | 每区域账号状态四档判定（`ok` / `expired` / `needs-app` / `signed-out`；纯本地证据、不含凭据，无 peer 依赖） |
+| `lib/settings-save.js` | 设置命名空间的解析（0.1.7 由宿主推导，插件不能自选）、设置写入、按区域合并与落盘读回校验（无 peer 依赖） |
+| `lib/pi-model.js` | pi-ai 模型描述符的构造（纯函数，无 peer 依赖） |
+| `lib/preferences.js` | 四个设置项的读取与 volatile 解包（`enabledRegions` 区域开关：缺失/非对象一律读作开启，只有显式 `false` 才关） |
+| `lib/offpeak.js` | 错峰窗口与费率算术（无 peer 依赖） |
+| `lib/single-flight.js` | 同类异步任务的并发合并：刷新在途时，后来的调用并入同一次请求（目录/用量刷新用，无 peer 依赖） |
+| `lib/errors.js` | 上游错误分类与「凭据是否过期」判定（无 peer 依赖） |
+| `lib/index.js` | 按区域注册 provider 的插件入口，与模型/用量/保存/账号状态路由（账号路由含「重读登录」的上线与回滚） |
+
+`lib/client.js` 是例外：它是 esbuild 产物，源码（`src/client/*.ts`）不在本仓库，
+也没有 sourcemap 或构建脚本可以重新生成它。`test/client-bundle.test.js` 直接从
+这份产物里**提取并执行**卡片的关键纯函数，因此改产物会让测试变红——这是目前
+唯一能守住卡片代码的手段。
+
+## 测试
+
+```sh
+npm test                # node --test "test/*.test.js"
+npm run test:coverage   # 同上 + 覆盖率门槛（行 68 / 分支 85 / 函数 66，跌破即失败）
+npm run verify:deploy   # 比对已部署副本与本仓库，报告漂移
+```
+
+`verify:deploy` 存在的理由和上面那些测试一样：**一台机器上可以同时装着好几个版本的本插件**。
+`link:` 安装是指向本仓库的符号链接、永远最新；市场安装是**复制**，停在安装那一刻，
+而且两边 `package.json` 的 `version` 一样——任何按版本判断新旧的升级路径都会认为「已是最新」。
+该脚本比对 `lib/**` 的内容哈希、文件清单，以及三个由真实缺陷换来的标记
+（错峰 `active` 门、账号状态模块、账号路由），并把「版本号相同但内容不同」单独标出来。
+`test/deploy-drift.test.js` 用假目录树钉住这套判定。
+
+CI 在 Node 22.19 / 24 × Ubuntu / Windows 上跑（`.github/workflows/test.yml`）——
+Windows 不是冗余：shim 绑定回环监听、目录缓存依赖 rename 覆盖、凭据读取要调
+PowerShell，这些在别的平台上行为不同。
+
+测试只用 Node 内置的 `node:test`，不需要安装任何依赖——**也不需要安装 peer 依赖**，
+这是刻意的：`lib/` 中凡是纯逻辑的部分都放在无 peer 依赖的模块里（见上表），
+这样它们才能被直接 import 并断言真实的实现，而不是在测试里手抄一份。
+
+几个文件存在的理由，都是因为曾经出过问题：
+
+- `test/catalog-fields.test.js` 与 `test/model-row.test.js` —— 错峰机制曾因
+  `promotion.active` / `promotion.timezone` 在 Host 投影时被丢掉而全程哑火，
+  而当时的测试是绿的，因为它测的是自己手抄的副本。同一个毛病在客户端又犯过一次：
+  卡片自己算窗口时漏看 `promotion.active`，把**拿不到**的折扣价显示给用户，
+  而模型选择器按 `before` 价计费，两个界面自相矛盾。
+  `model-row.test.js` 现在逐状态对拍两个门控；`client-bundle.test.js` 更进一步，
+  直接从产物里提取卡片的 `offPeakState` 并执行——删掉那行门控会让它变红，
+  而只会让 `model-row.test.js` 保持绿色。**副本不是防线。**
+- `test/credential-cache.test.js` —— 「重新登录无需重启」这条卖点的完整链路：
+  网关拒绝 → 谓词判定 → 置失效标志 → 下次请求重读。此前只有两端被测。
+- `test/credential-invalidation.test.js` —— 上面那条链路上的两个纯谓词。
+- `test/account-state.test.js` —— 账号状态四档判定（`lib/account-state.js`）：
+  全注入的存储读器 + 真实临时目录跑目录存在性检查，钉住「判定只信本地证据」
+  与「状态记录不含任何凭据材料」两条不变量。
+- `test/errors-classify.test.js` —— 105 与 10605 的优先级决定了「提示用户重新登录」
+  还是「排队等待」，两者弄反的代价完全不同。
+- `test/settings-save.test.js` —— DSH 0.1.7 上 `set()` 会静默成功而不落盘；
+  这段代码用「写入→读回→深比较」把假成功变成显式失败，测试里直接模拟
+  「`mutate` 成功但文档没变」的那个场景。也钉住了两件靠肉眼会漏的事：
+  命名空间只做全等匹配（`llm-qoder-extra` 不算我们的），字段白名单用
+  `Object.hasOwn`（`constructor` 不是一个字段）。
+- `test/pi-model.test.js` —— `toPiModel` 抽离成纯函数后的直接覆盖：
+  `compat.supportsDeveloperRole: false` 与「不声明 `maxTokens`」这两处，
+  失效时每个请求都会 403，或长回复被截成 `finish: max-tokens`。
+- `test/catalog-store.test.js` —— 目录缓存的原子落盘，用真实临时目录跑，
+  在 CI 所在的平台上实测 `rename` 覆盖行为，而不是在注释里假设。
+- `test/shim.test.js` —— 回环端点的鉴权与 `/v1/models` 过滤；对着真实
+  HTTP 服务器说话，Host 头用裸 socket 发送（`fetch` 禁止设置该头）。
+- `test/oscrypt.test.js` —— 凭据解密往返；夹具用真实 AES-256-GCM 构造，
+  key 是固定哈希，失败可复现。
+- `test/upstream-protocol.test.js` —— 编码与签名。两个盲区是**原理上不可测**的，
+  已在文件头写明。
+- `test/upstream-messages.test.js` —— 消息与工具调用翻译，注释里自称
+  「最重要的一件事」，此前零覆盖。
+
+尚未覆盖的部分集中登记在 `test/KNOWN_GAPS.md`，不在各文件里重复叙述——
+重复三处正是「手抄副本」那类问题的文档版。
 
 ## 免责声明
 
