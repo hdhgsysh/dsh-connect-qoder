@@ -24,8 +24,23 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { normalizeEntry, projectModelRow } from '../lib/catalog-entry.js'
+import { offPeakActive, offPeakRemaining, rateNow } from '../lib/offpeak.js'
 
-/** The card's own gate, reproduced so this test fails if the card's rule changes. */
+/**
+ * The card's own gate, reproduced so this test fails if the card's rule changes.
+ *
+ * SYNC CONSTRAINT: this is a copy of an expression that lives in the client
+ * card (lib/client.js, `models.some((m) => m.promotion?.active === true)`), and
+ * there is no way to import it — the card is a browser bundle built from
+ * TypeScript sources that are not in this repository. So this file is
+ * deliberately NOT import-clean, and it should not be read as being so.
+ *
+ * If the card's gate is ever rewritten, this copy has to be rewritten with it,
+ * or these tests will keep passing while asserting a rule nothing implements.
+ * That is the same mirror failure the sibling tests were rewritten to eliminate;
+ * it is accepted here only because the alternative — no coverage of the layer
+ * where the regression actually happened — is worse.
+ */
 function cardInstallsClock(rows) {
   return rows.some((m) => m.promotion?.active === true)
 }
@@ -46,16 +61,22 @@ const REGION = { id: 'qoder-cn', displayName: 'Qoder CN' }
 // The window is open, so the discount applies and the rate is the product.
 const NOW = new Date('2026-09-26T23:30:00+08:00')
 
-/** Stand-ins for the adapter's exported rate helpers. */
-const RATES = {
-  rateNow: (entry) => {
-    const promotion = entry.promotion
-    if (promotion === undefined) return Number(entry.priceFactor)
-    return promotion.beforePromotionPriceFactor * promotion.discountFactor
-  },
-  offPeakActive: (entry) => entry.promotion?.active === true,
-  offPeakRemaining: () => 1800,
-}
+/**
+ * The REAL rate helpers, not a stand-in.
+ *
+ * This used to be a hand-written `RATES` object duplicating the arithmetic. That
+ * made the file unfalsifiable in the way its siblings used to be: nothing
+ * checked the stand-in against the shipped `rateNow`, so "the rate flips at
+ * 22:00" was being asserted against a fiction. The helpers were then moved into
+ * lib/offpeak.js, which has no pi-ai dependency, so the real ones can be
+ * imported here.
+ *
+ * The fixture's `priceFactor` is deliberately different from
+ * `beforePromotionPriceFactor × discountFactor`, so a change that skipped the
+ * product would be visible rather than masked by a coincidentally equal
+ * fallback.
+ */
+const RATES = { rateNow, offPeakActive, offPeakRemaining }
 
 const ENTRY = normalizeEntry({
   key: 'GLM',
@@ -66,7 +87,7 @@ const ENTRY = normalizeEntry({
   maxInputTokens: 200000,
   defaultContextWindow: 128000,
   contextOptions: [128000, 200000],
-  priceFactor: 0.025,
+  priceFactor: 0.03,
   isFree: false,
   isDefault: true,
   promotion: PROMOTION,
@@ -97,8 +118,19 @@ test('the projected row forwards every promotion field', () => {
   for (const field of Object.keys(PROMOTION)) {
     assert.ok(field in row.promotion, `promotion.${field} was dropped by the host projection`)
   }
-  // Plus the one field the host itself computes.
-  assert.strictEqual(row.promotion.remainingSeconds, 1800)
+  // Plus the one field the host computes itself: the countdown to the next
+  // boundary. At 23:30 with a 22:00-08:00 window, that is 8h30m away.
+  assert.strictEqual(row.promotion.remainingSeconds, 8.5 * 3600)
+})
+
+test('the projected rate is the real discounted rate, not the stand-in', () => {
+  // This is the assertion that was impossible while `RATES` was a hand-written
+  // stand-in. Inside the window the rate must be before × discount, which for
+  // this entry differs from both the raw priceFactor and the before figure.
+  const row = projectModelRow(ENTRY, REGION, NOW, RATES)
+  assert.ok(Math.abs(row.effectiveRate - 0.01) < 1e-9, `expected 0.01, got ${row.effectiveRate}`)
+  assert.notStrictEqual(row.effectiveRate, 0.03, 'must not fall back to priceFactor')
+  assert.strictEqual(row.offPeakActive, true)
 })
 
 test('a bare model projects with no promotion block at all', () => {

@@ -95,7 +95,39 @@ dsh plugin --profile web add <本仓库路径>
 | `lib/upstream.js` | COSY 签名、请求体编码、目录与对话流 |
 | `lib/shim.js` | 面向 pi-ai 的 OpenAI 兼容回环端点 |
 | `lib/adapter.js` | pi-ai provider 与 `PiAiAdapter` profile |
+| `lib/catalog-entry.js` | 目录条目的归一化、模型过滤与卡片行投影（无 peer 依赖） |
+| `lib/offpeak.js` | 错峰窗口与费率算术（无 peer 依赖） |
+| `lib/errors.js` | 上游错误分类与「凭据是否过期」判定（无 peer 依赖） |
 | `lib/index.js` | 按区域注册 provider 的插件入口 |
+
+## 测试
+
+```sh
+npm test        # 等价于 node --test "test/*.test.js"
+```
+
+测试只用 Node 内置的 `node:test`，不需要安装任何依赖——**但也不需要安装 peer 依赖**，
+这是刻意的：`lib/` 中凡是纯逻辑的部分都放在无 peer 依赖的模块里（见上表），
+这样它们才能被直接 import 并断言真实的实现，而不是在测试里手抄一份。
+
+几个文件存在的理由，都是因为曾经出过问题：
+
+- `test/catalog-fields.test.js` 与 `test/model-row.test.js` —— 错峰机制曾因
+  `promotion.active` / `promotion.timezone` 在 Host 投影时被丢掉而全程哑火，
+  而当时的测试是绿的，因为它测的是自己手抄的副本。
+- `test/credential-invalidation.test.js` —— 同上：把 `lib/shim.js` 里的检测
+  正则改坏，该测试依然全绿。
+- `test/errors-classify.test.js` —— 105 与 10605 的优先级决定了「提示用户重新登录」
+  还是「排队等待」，两者弄反的代价完全不同。
+- `test/shim.test.js` —— 回环端点的鉴权与 `/v1/models` 过滤；这里对着真实
+  HTTP 服务器说话，Host 头用裸 socket 发送（`fetch` 禁止设置该头）。
+- `test/upstream-protocol.test.js` —— 编码与签名。这两个盲区是**原理上不可测**的，
+  已在文件头写明：RSA 的 PKCS#1 v1.5 与 OAEP 无法从密文区分；常量化的 AES key
+  仍会每次产生不同的 `Cosy-Key`（padding 随机）。
+- `test/upstream-messages.test.js` —— 消息与工具调用翻译，注释里自称
+  「最重要的一件事」，此前零覆盖。
+
+尚未覆盖的部分写在各测试文件的头部，而不是假装已经覆盖。
 
 ## 免责声明
 
