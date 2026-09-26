@@ -1,19 +1,25 @@
 /**
- * Guard `fetchUserInfo` against the bare-Bearer regression that broke 在线确认.
+ * Pin `fetchUserInfo` to the shared OpenAPI header set.
  *
  * Run: node --test test/userinfo-headers.test.js
  *
  * WHY THIS FILE EXISTS
  *
- * The card's 在线确认 button calls `fetchUserInfo`, and on the CN region the
- * upstream answered a bare `Authorization: Bearer` request with a 400 instead
- * of the profile. The quota/campaigns OpenAPI calls all go through the shared
+ * Every other OpenAPI call this plugin makes goes through the shared
  * `openApiHeaders` helper — the exact header set the real Qoder client sends
- * (`Cosy-ClientType`, `User-Agent`, plus the Bearer token) — and `fetchUserInfo`
- * was the one OpenAPI call still hand-rolling its own, slimmer headers. This
- * test is what keeps it on the shared path: a future edit that reverts
- * `fetchUserInfo` to a bare Bearer goes red here, before the user's card meets
- * the 400 again.
+ * (`Cosy-ClientType`, `User-Agent`, plus the Bearer token) — while
+ * `fetchUserInfo` hand-rolled its own, slimmer headers, so the confirm route
+ * presented a different client identity than every other call. This test
+ * keeps it on the shared path: an edit that reverts `fetchUserInfo` to a bare
+ * Bearer goes red here.
+ *
+ * It is a consistency pin, NOT the fix for the 400 the card once showed on
+ * 在线确认. That 400 came from the account route dereferencing a runtime
+ * entry's nonexistent `region` field before the call was ever made (see the
+ * stopped-region check in lib/index.js). A probe of
+ * `openapi.qoder.com.cn/api/v1/userinfo` with a real CN credential answers
+ * 200 for a bare `Authorization: Bearer` too, so this header set is not what
+ * the CN endpoint gates on.
  *
  * The test cannot reach the real gateway (that needs a live sign-in), so it
  * stubs `globalThis.fetch`, captures the request, and asserts on the headers —
@@ -57,12 +63,11 @@ test('fetchUserInfo sends the real-client header set, not a bare Bearer', async 
     assert.strictEqual(captured.url, `${CN_REGION.openApiUrl}/api/v1/userinfo`)
     const headers = captured.init.headers
 
-    // The three headers that identify the request as coming from the Qoder
-    // client — the set every other OpenAPI call sends via openApiHeaders. A
-    // bare-Bearer regression drops exactly these.
+    // The client-identifying headers every OpenAPI call sends through
+    // openApiHeaders; a bare-Bearer edit drops exactly these two.
     assert.strictEqual(headers.Authorization, `Bearer ${CREDENTIAL.token}`)
-    assert.strictEqual(headers['Cosy-ClientType'], '10', 'missing Cosy-ClientType — the 400 regression')
-    assert.strictEqual(headers['User-Agent'], 'Qoder', 'missing User-Agent — the 400 regression')
+    assert.strictEqual(headers['Cosy-ClientType'], '10', 'missing Cosy-ClientType — the shared header set lost it')
+    assert.strictEqual(headers['User-Agent'], 'Qoder', 'missing User-Agent — the shared header set lost it')
   } finally {
     globalThis.fetch = original
   }
