@@ -27,9 +27,9 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
-import { applyCatalogOutcome, REFRESH_FAILURE_REASONS, isRefreshObsolete } from '../lib/catalog-refresh.js'
-import { normalizeEntry } from '../lib/catalog-entry.js'
-import { ProtocolShapeChangedError, isProtocolShapeChangedError } from '../lib/errors.js'
+import { applyCatalogOutcome, REFRESH_FAILURE_REASONS, isRefreshObsolete } from '../src/host/catalog-refresh.ts'
+import { normalizeEntry } from '../src/host/catalog-entry.ts'
+import { ProtocolShapeChangedError, isProtocolShapeChangedError } from '../src/host/errors.ts'
 
 /** A catalog stand-in that records what was committed and when. */
 function makeCatalog(initial = [], now = 1_000) {
@@ -223,11 +223,20 @@ test('the refresh consults dispose on BOTH the success and the failure path', ()
   // longer exists. Both halves are pinned, and so is the controller, because a
   // dispose that only sets a flag leaves the upstream socket open.
   const source = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'index.js'),
+    join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'host', 'index.ts'),
     'utf8',
   )
-  const body = /async doRefreshCatalog\(force\) \{[\s\S]*?\n  \}/.exec(source)
-  assert.ok(body !== null, 'lib/index.js no longer has a doRefreshCatalog of that shape')
+  // The parameter list and return annotation are matched loosely rather than
+  // as the bare `(force)` this used to be: the assertion is about what the
+  // method BODY does, and pinning the exact spelling made a pure type
+  // annotation (`force` → `force?: boolean`) look like a regression.
+  //
+  // The body is anchored on `\r?\n  \}` so it still stops at the method's own
+  // closing brace. The source is read with LF line endings in a working copy
+  // and CRLF in a fresh checkout, so the terminator has to accept both — the
+  // literal `\n` it used before only ever matched one of the two.
+  const body = /async doRefreshCatalog\([^)]*\)[^{]*\{[\s\S]*?\r?\n  \}/.exec(source)
+  assert.ok(body !== null, 'src/host/index.ts no longer has a doRefreshCatalog of that shape')
   const refresh = body[0]
   const checks = refresh.match(/isRefreshObsolete\(this\)/g) ?? []
   assert.ok(
@@ -242,7 +251,7 @@ test('the refresh consults dispose on BOTH the success and the failure path', ()
   )
   // And dispose itself must fire it.
   const dispose = /ctx\.effect\(\(\) => async \(\) => \{[\s\S]*?\n  \}\)/.exec(source)
-  assert.ok(dispose !== null, 'lib/index.js no longer has the fiber effect cleanup')
+  assert.ok(dispose !== null, 'src/host/index.ts no longer has the fiber effect cleanup')
   assert.match(
     dispose[0],
     /refreshAbort\?\.abort\(\)/,

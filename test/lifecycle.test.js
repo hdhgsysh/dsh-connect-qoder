@@ -27,7 +27,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-import { rememberRouteRelease, releaseRoutes } from '../lib/lifecycle.js'
+import { rememberRouteRelease, releaseRoutes } from '../src/host/lifecycle.ts'
 
 test('a release handed back by the host is remembered and called', () => {
   const sink = []
@@ -109,16 +109,22 @@ test('an absent sink is not a crash', () => {
 })
 
 test('every route registration in the plugin is collected', () => {
-  // lib/index.js cannot be imported, so this is the wiring assertion: a new
+  // src/host/index.ts cannot be imported, so this is the wiring assertion: a new
   // route that forgets the wrapper would be a silent leak, and there are seven
   // registration sites to keep in step.
   const source = readFileSync(
-    new URL('../lib/index.js', import.meta.url),
+    new URL('../src/host/index.ts', import.meta.url),
     'utf8',
   ).replaceAll('\r\n', '\n')
-  const registrations = source.match(/webCtx\.webServer\.register\(\{/g) ?? []
+  // The receiver is spelled `webServer.register` because each `inject`
+  // callback binds the injected service to a local once (`const webServer =
+  // injected(webCtx.webServer, 'webServer')`) rather than reading
+  // `webCtx.webServer` at every site. The guard's subject is the CALL, not the
+  // receiver expression, so it matches either spelling.
+  const registration = /(?:webCtx\.)?webServer\.register\(\{/g
+  const registrations = source.match(registration) ?? []
   assert.ok(registrations.length > 0, 'no route registrations found — the pattern changed')
-  for (const match of source.matchAll(/webCtx\.webServer\.register\(\{/g)) {
+  for (const match of source.matchAll(registration)) {
     const before = source.slice(Math.max(0, match.index - 60), match.index)
     assert.match(
       before,

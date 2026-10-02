@@ -30,7 +30,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { readAccountState, readAccountStateAsync } from '../lib/account-state.js'
+import { readAccountState, readAccountStateAsync } from '../src/host/account-state.ts'
 
 const REGION = {
   id: 'qoder-cn',
@@ -38,6 +38,7 @@ const REGION = {
   appNames: ['QoderCN'],
   newAppNames: ['com.qodercn.app.stable'],
   manageUrl: 'https://qoder.com.cn',
+  downloadUrl: 'https://qoder.com.cn/download',
   baseUrl: 'https://gateway.qoder.com.cn/',
 }
 
