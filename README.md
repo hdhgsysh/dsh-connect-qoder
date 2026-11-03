@@ -2,6 +2,8 @@
 
 <p align="center"><b>把本机已登录的 Qoder 模型（国内版 / 国际版）接入 DeepSeek Harness，零配置用你的账号额度。</b></p>
 
+此项目已停更，最高支持dsh-0.21.5仍然可用，相关功能已合并到[dingminhua版](https://github.com/dingminhua/dsh-connect-qoder)
+
 <p align="center">
   <a href="#安装">安装</a> ·
   <a href="#工作原理">工作原理</a> ·
