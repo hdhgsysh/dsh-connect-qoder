@@ -21,3 +21,21 @@ and replaced it with `configForms`. The patch:
 The source at `lib/client.js` and `lib/index.js` already contains this
 change; the patch file is kept only as a reference for the 0.1.6 → 0.1.7
 migration. Do not re-apply it.
+
+## 0.5.0-abi-cutover.md
+
+Decision record (not a patch) for the 0.5.0 cut of the 0.1.x host ABI:
+evidence from the 0.2.0-rc.2 host (which no longer carries
+`installSection` / `settingsScope`), what was removed and what stayed, and
+the `>=0.2.0-rc.0` floor rationale. Read it before touching the settings
+activation path again.
+
+## 2026-10-21-test-tree-type-debt.md
+
+Dated measurement of the test tree's type-error debt (the whole-tree
+`checkJs: true` program): total, per-error-code and per-file breakdown, plus
+the two non-test files the test tree drags into that program. It is a
+snapshot, not a promise — the ceiling itself lives in
+`scripts/ratchet-ledger.json`, and `npm run audit:test-type-errors` prints
+today's numbers. Read it to plan the debt reduction; do not quote its
+numbers as current.

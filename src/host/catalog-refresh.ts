@@ -1,54 +1,22 @@
 /**
  * What one catalog refresh does with its answer.
  *
- * WHY THIS IS A MODULE
+ * Pure decision logic extracted from `RegionRuntime.doRefreshCatalog`
+ * (lib/index.js), which a test checkout cannot import (Cordis peer deps).
  *
- * `RegionRuntime.doRefreshCatalog` (lib/index.js) is the code this file exists
- * to test, and it cannot be imported: lib/index.js pulls in the Cordis peer
- * dependencies, which a test checkout does not install. It was extracted for
- * the same reason and with the same method as `lib/credential-cache.js` and
- * `lib/catalog-entry.js` — the decision is pure, so it belongs somewhere the
- * suite can reach, while the surrounding runtime keeps only the I/O.
- *
- * THE BUG THIS KEEPS FROM COMING BACK
- *
- * The original was three lines:
- *
- * ```js
- * const entries = raw.map(normalizeEntry)
- * if (entries.length > 0) {          // <-- the freeze (issue 04)
- *   this.catalog.replace(entries)
- *   this.invalidate?.()
- * }
- * ```
- *
- * That guard merged two answers that must not be merged. Upstream returning
- * zero models is a *result* — the account was narrowed, or the models were
- * retired — and it has to reach the disk, because an empty model group is how
- * DSH hides a provider and how the card tells the user there is nothing. But
- * with the guard in place, an empty result and a thrown fetch were the same
- * silent no-op: the last good roster stayed in place forever, the card and the
- * picker kept offering models the account no longer has, and pressing
- * "刷新计费" could not possibly change anything, because the only thing the
- * code path could do was nothing.
- *
- * So the rule this module states is: **an answer is committed even when it is
- * empty; only a failure keeps the previous catalog.** A failure also records
- * why, and records it per-reason — because "the plugin is out of date" and
- * "the network hiccuped" both keep the old rows, and the card must not tell a
- * user to update the plugin when the truth is to try again in a minute.
+ * The rule: an answer is committed even when EMPTY — only a failure keeps the
+ * previous catalog, and each failure names its own reason. Committed is not
+ * persisted: a swallowed disk write is reported as a `persist` failure.
  *
  * @module dsh-connect-qoder/catalog-refresh
  */
-import type { CatalogOutcome, RefreshableRuntime, RefreshFailure } from './domain.ts'
-
-/** The reasons a refresh can leave the catalog unrefreshed. */
-export const REFRESH_FAILURE_REASONS = [
-  'credential',
-  'no-credential',
-  'fetch',
-  'protocol-shape-changed',
-]
+import { REFRESH_FAILURE_REASONS } from './domain.ts'
+import type { CatalogOutcome, RefreshableRuntime, RefreshFailure, RefreshFailureReason } from './domain.ts'
+// Re-exported so this module keeps presenting one surface for the refresh rule,
+// while the definition (and the type derived from it) lives in `domain.ts` —
+// `domain.ts` is where the interface `RefreshFailure` needs it, and importing
+// upward from here would be the cycle.
+export { REFRESH_FAILURE_REASONS }
 
 /**
  * Whether a refresh that finished after a dispose may still touch the runtime.
@@ -74,6 +42,21 @@ export function isRefreshObsolete(runtime: RefreshableRuntime | null | undefined
 }
 
 /**
+ * Every reason the fold will record, as a value list plus a type guard.
+ *
+ * The list itself lives in `domain.ts` (the `RefreshFailure` interface needs it
+ * and cannot import from here), and this is the runtime half: the union type
+ * stops a bad reason at compile time for typed callers, and the guard stops one
+ * arriving from an untyped edge — a `CatalogOutcome` built from parsed JSON, or
+ * a test double.
+ */
+function refreshFailureReasonOf(reason: unknown): RefreshFailureReason {
+  return REFRESH_FAILURE_REASONS.includes(reason as RefreshFailureReason)
+    ? (reason as RefreshFailureReason)
+    : 'fetch'
+}
+
+/**
  * Fold one refresh's outcome into a runtime.
  *
  * Split by outcome so each branch can be asserted on its own, because the bug
@@ -95,7 +78,16 @@ export function applyCatalogOutcome(
   if (outcome.ok !== true) {
     // Kept, not overwritten: a failed refresh is a statement about THIS fetch,
     // and the previous catalog is the one still on screen.
-    runtime.refreshFailed = { reason: String(outcome.reason ?? 'fetch'), error: outcome.error }
+    //
+    // The reason is VALIDATED rather than stringified. It used to be
+    // `String(outcome.reason ?? 'fetch')`, which accepted any value at all and
+    // pushed the problem into the card: `refreshNoticeKey` answers its
+    // `default` branch — the "temporary, try again" copy — for a reason it does
+    // not recognise, so a typo or a new reason with no client copy would leave
+    // the plugin telling the user to retry when the real answer was to update
+    // the plugin. Falling back to `fetch` here is the conservative choice: it
+    // claims the least.
+    runtime.refreshFailed = { reason: refreshFailureReasonOf(outcome.reason), error: outcome.error }
     return { committed: false, previousFailure }
   }
   // Empty is a value. `replace([])` advances `fetchedAt`, so the TTL refreshes
@@ -106,7 +98,19 @@ export function applyCatalogOutcome(
   // nowhere to put the answer; it still gets `refreshFailed` cleared and the
   // invalidation below, which is all the notification such a runtime can use.
   runtime.catalog?.replace(outcome.entries)
-  runtime.refreshFailed = undefined
+  // A `replace()` advances the in-memory roster even when the disk write was
+  // swallowed (`CatalogStore.save()` records the error and returns — a
+  // read-only Home must not kill the panel). That divergence has to stay
+  // visible: if the fold cleared the failure marker here, the card would stamp
+  // "已更新" on a catalog the disk does not have and a restart would silently
+  // revert it. The write error is surfaced as its own failure class — the rows
+  // stay (they are the correct roster for this process; only the disk lagged).
+  const persistError = runtime.catalog?.lastSaveError
+  if (persistError !== undefined) {
+    runtime.refreshFailed = { reason: 'persist', error: persistError }
+  } else {
+    runtime.refreshFailed = undefined
+  }
   // Called unconditionally, including for the empty result: a group that has to
   // disappear from the picker must be re-advertised as having disappeared, or
   // DSH keeps routing to a provider that now offers nothing.

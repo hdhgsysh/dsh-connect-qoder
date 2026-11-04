@@ -1,0 +1,7 @@
+{
+  "$comment": "The program that MEASURES the test tree's type debt. It is the same program as tsconfig.test.json with one difference: `checkJs` is on, so the .js test files that have not opted in are CHECKED instead of merely parsed, and their errors are counted instead of ignored. The count is what scripts/audit-test-type-errors.mjs gates: a budget that may only shrink, so a new test file that arrives with twenty type errors in it cannot slip in behind the file-count ratchet (13 files opted in is a number that a clean new file inflates for free, while a file with sixty errors can only ever lower it). This config is NOT a pass/fail program and must never be used as one: it always exits 2 while the debt is above zero, and `npm run typecheck` deliberately does not read it. The `extends` chain is deliberate too — the same include, the same exclude, the same compilerOptions as tsconfig.test.json, so the measured debt is the debt of the program the other gate looks at, not of a second, slightly different program.",
+  "extends": "./tsconfig.test.json",
+  "compilerOptions": {
+    "checkJs": true
+  }
+}

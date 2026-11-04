@@ -123,13 +123,22 @@ test('the payload is built by the importable module, not inline in this file', (
   )
 })
 
-test('the account GET serves the cached payload', () => {
+test('the account GET delegates to the shared cached payload builder', () => {
   // And the route that renders the panel must be the one serving it, rather
-  // than assembling its own body from a live read somewhere else.
+  // than assembling its own body from a live read somewhere else. Whether the
+  // shared builder reads cached by default is now asserted by EXECUTING
+  // accountHandler in test/handlers.test.js; what this pins is that the route
+  // hands it the builder at all.
+  const handler = handlerFor('QODER_ACCOUNT_PATH')
   assert.match(
-    handlerFor('QODER_ACCOUNT_PATH'),
-    /accountPayload\(\)/,
-    'GET /account must answer from the shared (cached) payload builder',
+    handler,
+    /accountHandler\(/,
+    'GET /account must delegate to src/host/handlers.ts accountHandler',
+  )
+  assert.match(
+    handler,
+    /payload: accountPayload/,
+    'and hand it the shared (cached-by-default) payload builder',
   )
 })
 
@@ -138,14 +147,19 @@ test('the account reload re-reads for real, ignoring the failure window', () => 
   // edit would break: this route IS the user saying "read it again now". Reading
   // it from a remembered failure makes the button silently do nothing.
   //
-  // The mode now lives in the shared payload builder rather than in the handler
-  // (issue 12, item 8 — the two bodies had drifted apart in SHAPE as well), so
-  // this asserts the route asks for the forced variant of that one builder.
+  // The `force: true` the reload asks for now lives in the executable
+  // reloadHandler (test/handlers.test.js); what this pins is that the route
+  // hands it the shared builder, not a bespoke read.
   const handler = handlerFor('QODER_ACCOUNT_RELOAD_PATH')
   assert.match(
     handler,
-    /accountPayload\(\{\s*force:\s*true\s*\}\)/,
-    'POST /account/reload must ask for the forced read — otherwise 重读登录 is a no-op',
+    /reloadHandler\(/,
+    'POST /account/reload must delegate to src/host/handlers.ts reloadHandler',
+  )
+  assert.match(
+    handler,
+    /payload: accountPayload/,
+    'and hand it the shared payload builder — the forced variant is what reloadHandler asks for',
   )
   assert.doesNotMatch(
     handler,
@@ -171,21 +185,46 @@ test('the cached-vs-forced decision is not made in the routing file', () => {
   )
 })
 
-test('the two account routes answer with the SAME shape', () => {
+test('the two account routes hand their handlers the SAME payload builder', () => {
   // The reload response used to be `{ regions }` while the GET answered
   // `{ regions, enabledRegions }`, so the card had to follow every re-read with a
   // second GET to learn the per-region switches — and the two answers could
   // disagree in between, which is a UI showing a switch state that is not the
   // one it just wrote.
+  //
+  // Both bodies now go through ONE shared builder (asserted for real by
+  // executing accountHandler / reloadHandler in test/handlers.test.js); what
+  // this pins is that both routes hand their handler that same `accountPayload`,
+  // so a third, narrower body cannot quietly appear on one of them.
+  assert.match(
+    handlerFor('QODER_ACCOUNT_PATH'),
+    /payload: accountPayload/,
+    'GET /account must hand accountHandler the shared payload builder',
+  )
   assert.match(
     handlerFor('QODER_ACCOUNT_RELOAD_PATH'),
-    /sendJson\(res, 200, await accountPayload\(/,
-    'the reload route must send the shared payload, not a narrower object literal',
+    /payload: accountPayload/,
+    'POST /account/reload must hand reloadHandler the SAME builder',
   )
-  assert.doesNotMatch(
-    handlerFor('QODER_ACCOUNT_RELOAD_PATH'),
-    /sendJson\(res, 200, \{ regions \}\)/,
-    'a hand-built { regions } body is the shape drift this replaced',
+})
+
+test('the confirm route resolves through the shared per-region cache', () => {
+  // "确认登录" asks the upstream who the sign-in belongs to. The credential it
+  // checks must come from the SAME three sources a runtime uses — desktop
+  // store, then the plugin's own browser sign-in, then the PAT — and the
+  // fallback for a region that has not started must not stop at the desktop
+  // store: on a machine with no desktop client that is exactly the branch that
+  // reported "no sign-in" for an edition that had one.
+  const handler = handlerFor('QODER_ACCOUNT_CONFIRM_PATH')
+  assert.match(
+    handler,
+    /confirmHandler\(/,
+    'POST /account/confirm must delegate to src/host/handlers.ts confirmHandler',
+  )
+  assert.match(
+    handler,
+    /readCredential: async \(region\) => regionSources\.get\(region\.id\)\?\.credentials\.resolve\(\)/,
+    'the confirm route must resolve through the shared per-region credential cache',
   )
 })
 

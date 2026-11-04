@@ -14,36 +14,12 @@
  */
 export type RouteRelease = () => void
 
-/**
- * Remember what a route registration returned, so it can be undone on dispose.
- *
- * WHY THIS EXISTS, AND WHY IT GUESSES NOTHING
- *
- * Every `webServer.register({ … })` call in this plugin discarded its return
- * value. Whether that is a leak depends on a question this repository cannot
- * answer from here: does `@deepseek-ai/dsh-host-webserver` tie a registration to
- * the fiber it was made from, or does it need an explicit release? The package
- * ships inside the host's `app.asar`, which is not readable from a plugin
- * checkout, so the answer is not available as of this writing
- * (docs/issues/13, "需先确认宿主语义").
- *
- * Rather than assume either way, the registrations are collected and released
- * if — and only if — `register` handed back something callable. That is correct
- * under both host behaviours: a host that reclaims by fiber ignores the extra
- * call, and a host that does not gets the release it was missing. Nothing here
- * asserts a host contract it cannot see, and a host that changed the shape of
- * the return value degrades to "no release" — today's behaviour — rather than
- * throwing during dispose.
- *
- * The cost of getting this wrong the other way is real: a leaked route keeps a
- * handler, and through it a whole runtime, reachable after the plugin is
- * disabled, so a POST to it would start a shim and a refresh interval that
- * nothing will ever clean up.
- *
+/** Remember a route registration's release so dispose can undo it; the host's
+ * reclaim semantics are unreadable from a plugin, so only a callable result is
+ * released — correct under both host behaviours. Incident: docs/issues/13-lifecycle-dispose.md.
  * @param sink - the array collecting releases for this fiber.
  * @param result - whatever `webServer.register(...)` returned.
- * @returns the release, or `undefined` when there was nothing to keep.
- */
+ * @returns the release, or `undefined` when there was nothing to keep. */
 export function rememberRouteRelease(
   sink: RouteRelease[],
   result: unknown,

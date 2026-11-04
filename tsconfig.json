@@ -1,5 +1,5 @@
 {
-  "$comment": "Source is TypeScript now (src/host/*.ts, src/client/*.ts), and every .ts file is type-checked unconditionally — `checkJs` only governs plain .js files, of which src/ has none. noImplicitAny is TRUE: the 536 implicit-any sites the migration left behind are all annotated, so the rule is now enforced by the compiler instead of by a ratchet (scripts/audit-implicit-any.mjs still runs, with a budget of 0, as a second opinion and as the place the trajectory is recorded). strictNullChecks is TRUE as well (via `strict`): the 99 sites it reported — 39 undefined-callable, and the rest null/index/assignability — are all settled, none of them with a `!`. Two of those were real bugs the flag surfaced: a request header that went out as the literal text \"undefined\" when a machine fingerprint was absent, and a `null` check-in notice that a `!== undefined` guard let through to a `.kind` read. `strict` also implies strictBindCallApply / strictFunctionTypes / noImplicitThis, all of which were already on individually. Run it with `npm run typecheck`.",
+  "$comment": "Source is TypeScript now (src/host/*.ts, src/client/*.ts), and every .ts file is type-checked unconditionally — `checkJs` only governs plain .js files, of which src/ has none. noImplicitAny is TRUE: the 536 implicit-any sites the migration left behind are all annotated, so the rule is now enforced by the compiler instead of by a ratchet (scripts/audit-implicit-any.mjs still runs, with a budget of 0, as a second opinion and as the place the trajectory is recorded). strictNullChecks is TRUE as well (via `strict`): the 99 sites it reported — 39 undefined-callable, and the rest null/index/assignability — are all settled, none of them with a `!`. Two of those were real bugs the flag surfaced: a request header that went out as the literal text \"undefined\" when a machine fingerprint was absent, and a `null` check-in notice that a `!== undefined` guard let through to a `.kind` read. `strict` also implies strictBindCallApply / strictFunctionTypes / noImplicitThis, all of which were already on individually. `erasableSyntaxOnly` is TRUE and is the one flag here that exists for the TEST harness rather than for the types: the suite runs on bare `node --test` with no bundler and no dependencies, importing `src/host/*.ts` and the client's rule layer (`card-model.ts`, `controller.ts`) directly, so Node's strip-only loader is the real compiler for everything a test can reach. Strip-only mode cannot execute `enum`, `namespace`, parameter properties (`constructor(private x)`) or angle-bracket assertions (`<T>expr`), and it fails at RUNTIME with ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX — but plain tsc accepts all four, so without this flag a `.ts` file can typecheck clean and only explode when the suite runs it. The flag turns that discipline into a compile-time error (TS1294). It costs nothing today because the sources are already fully erasable; the ambient `declare namespace JSX` in `src/client/react-shim.d.ts` is a declaration, not a runtime namespace, and is unaffected. This is also the line that decides which extension a file may use: anything a bare-Node test imports must be `.ts`; `.tsx` is for the render layer, which no test imports directly (Node cannot execute `.tsx` under any flag). Run it with `npm run typecheck`. `exactOptionalPropertyTypes` is TRUE as well, and it is the flag that separates \"a key may be absent\" from \"a key present holding undefined\". The two are different to every consumer that iterates keys or spreads a record, and this repository writes `undefined` into optional fields on purpose in several places (a missing check-in amount, an unknown credential identity, a region whose credential kind has not resolved). With the flag on, each of those has to SAY so in the type (`x?: T | undefined`) instead of relying on the compiler to accept the narrower `x?: T` — 41 sites were reported and settled, all by widening a declaration or by spreading a key in only when it exists, none by deleting the key or writing a lie into the object. Run it with `npm run typecheck`.",
   "compilerOptions": {
     "target": "ES2023",
     "module": "NodeNext",
@@ -10,6 +10,8 @@
     "checkJs": false,
     "noEmit": true,
     "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "jsx": "react-jsx",
     "strict": true,
     "noImplicitAny": true,
     "noImplicitThis": true,
@@ -23,7 +25,8 @@
     "noUnusedParameters": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "exactOptionalPropertyTypes": true
   },
   "include": ["src/host", "src/client", "types/*.d.ts"],
   "exclude": ["node_modules", "lib", "test"]

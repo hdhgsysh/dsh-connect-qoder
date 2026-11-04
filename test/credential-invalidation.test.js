@@ -62,7 +62,7 @@ test('isCredentialUsable gates the cache on the source-specific expiry rule', ()
 })
 
 test('isStaleCredentialError recognises a sign-in failure', () => {
-  // The flag the upstream classifier sets (src/host/upstream.ts sets this on a
+  // The flag the upstream classifier sets (src/host/upstream/sse.ts sets this on a
   // `sign-in-expired` classification), and the message shapes the real errors
   // carry. The long form is the one `failureMessage` produces.
   const signInErrors = [

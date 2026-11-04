@@ -37,15 +37,19 @@
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, relative } from 'node:path'
+import { describeError, LEDGER_REL, loadLedger, ratchetValue } from './ratchet-ledger.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
- * The debt ceiling. Only `--write` changes this, and that is the point: the
- * number that gates the build is edited deliberately, in a diff a reviewer
- * reads, rather than drifting as a side effect of ordinary work.
+ * The debt ceiling. It is not a constant in this file any more: it is a line
+ * in the ratchet ledger (`scripts/ratchet-ledger.json`), next to the record of
+ * how it got there. A value the ledger does not account for is refused, so
+ * the number that gates the build moves only as a recorded act — from, to,
+ * date, reason — in a diff a reviewer reads, rather than drifting as a side
+ * effect of ordinary work.
  *
- * 536 is the measured count, not an estimate. The migration commit reported
+ * 0 is the measured count, not an estimate. The migration commit reported
  * "445 implicit any", which was parameter positions only; turning the flag on
  * for real also reports the ~91 TS7031/TS7018 VARIABLE sites (`let x = …` with
  * no type and no inference), which a parameter-shaped count misses. Starting
@@ -66,7 +70,21 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
  * the empty shell had been hiding, one of which was a real call-arity bug.
  * An `any` you cannot see is worth more attention than one you can.
  */
-const BUDGET = 0
+const LEDGER_RATCHET = 'implicitAnyBudget'
+
+let ledger = null
+try {
+  ledger = loadLedger()
+} catch (err) {
+  console.error(
+    `\nFAIL the ratchet ledger is not consistent: ${describeError(err)}\n` +
+      `  (${LEDGER_REL} is the single source of truth for this budget — a threshold nobody ` +
+      'accounted for is a threshold nobody noticed.)',
+  )
+  process.exit(1)
+}
+
+const BUDGET = ratchetValue(ledger, LEDGER_RATCHET)
 
 // Flags from tsconfig's `strict` family that `noImplicitAny` implies. Passing
 // these explicitly keeps this script's count identical whether or not the
@@ -137,7 +155,11 @@ if (process.argv.includes('--write')) {
     .map(([file, e]) => `  ${String(e.count).padStart(4)}  ${file}  ${[...e.codes].map(([c, n]) => `${c}×${n}`).join(' ')}`)
     .join('\n')
   console.log(body)
-  console.log(`\n${total} total — update BUDGET in scripts/audit-implicit-any.mjs by hand (no --write-in-place).`)
+  console.log(
+    `\n${total} total — to move the ceiling, record it in ${LEDGER_REL} (ratchet "${LEDGER_RATCHET}": ` +
+      'a change entry with from, to, date and reason). The ledger is checked, so a number that is not ' +
+      'recorded there is refused.',
+  )
   process.exit(0)
 }
 
@@ -147,23 +169,33 @@ if (unparsed.length > 0) {
   process.exit(1)
 }
 
+// The budget that is actually enforced: `--budget N` tightens it for one run.
+// It is parsed BEFORE the report so the report can name the number that was
+// in force — a report that names a different number than the one the gate
+// enforced is how a debt gets waved through with a green line in the log.
+const budgetArg = process.argv.indexOf('--budget')
+const budget = budgetArg === -1 ? BUDGET : Number(process.argv[budgetArg + 1])
+if (!Number.isFinite(budget)) {
+  console.error(
+    `\nFAIL implicit-any audit: --budget needs a number, got ${JSON.stringify(process.argv[budgetArg + 1] ?? null)}`,
+  )
+  process.exit(1)
+}
+
 // Report before the gate so the failure is legible, not just a number.
 const rows = [...perFile.entries()].sort((a, b) => b[1].count - a[1].count)
-console.log(`implicit-any sites: ${total} (budget ${BUDGET})`)
+console.log(`implicit-any sites: ${total} (budget ${budget})`)
 for (const [file, e] of rows) {
   console.log(`  ${String(e.count).padStart(4)}  ${file}  ${[...e.codes].map(([c, n]) => `${c}×${n}`).join(' ')}`)
 }
 
-const budget = process.argv.includes('--budget')
-  ? Number(process.argv[process.argv.indexOf('--budget') + 1])
-  : BUDGET
-
 if (!(total <= budget)) {
   console.error(
-    `\nFAIL implicit-any ratchet: ${total} sites, budget ${BUDGET}. ` +
-      `The debt grew. Annotate the new sites, or take the increase deliberately by ` +
-      `editing BUDGET in scripts/audit-implicit-any.mjs — silently, this is how ` +
-      `537 becomes 700 and nobody notices.`,
+    `\nFAIL implicit-any ratchet: ${total} sites, budget ${budget}. ` +
+      `The debt grew. Annotate the new sites, or take the increase deliberately: record it in ` +
+      `${LEDGER_REL} (ratchet "${LEDGER_RATCHET}", a change entry with from ${budget}, to ${total}, ` +
+      'the date and a reason) and set the value to that. ' +
+      'A ceiling nobody accounted for is a ceiling nobody noticed.',
   )
   process.exit(1)
 }

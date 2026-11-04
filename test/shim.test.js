@@ -7,10 +7,10 @@
  * pi-ai's OpenAI expectations and Qoder's protocol — and it had no coverage at
  * all. That matters more here than elsewhere because most of its invariants are
  * things a request can simply fail to satisfy without any error surfacing: a
- * model left out of `GET /v1/models` never appears in the picker, a `[DONE]`
- * sent after a broken stream makes a half-written answer look complete, and a
- * usage frame dropped because it has no choices makes every turn report zero
- * tokens.
+ * model left out of `GET /v1/models` never appears in the picker, a broken
+ * stream that ends with `[DONE]` but carries no in-band error frame makes a
+ * half-written answer look complete, and a usage frame dropped because it has
+ * no choices makes every turn report zero tokens.
  *
  * These tests start the real server on a real ephemeral port and speak HTTP to
  * it. Nothing here is mocked except the upstream call itself, which is
@@ -182,6 +182,39 @@ test('a legitimate loopback Host is accepted', async () => {
     '',
   ].join('\r\n'))
   assert.match(raw, /^HTTP\/1\.1 200/)
+})
+
+test('the shim accepts the same loopback set the card routes do', async () => {
+  // This gate used to be a second, hand-written copy of the loopback rule, and
+  // it had already drifted from `routes.isLoopbackAuthority` in three ways —
+  // each of these three lines was a request the card routes accepted and the
+  // shim refused. The shim is the wrong one to be strict on by accident: it is
+  // the only surface that listens on a real port and carries a real token, so a
+  // spurious refusal looks exactly like a broken plugin, while the drift itself
+  // is invisible in review because both copies read like the same predicate.
+  //
+  // The list is now imported rather than re-spelled, so this asserts the
+  // IMPORT — a future copy-paste back into `shim.ts` fails here.
+  const { port } = new URL(shim.base)
+  for (const host of [
+    '127.0.0.2', // loopback by definition; `127.` prefix rule
+    'LocalHost', // case-folded only in routes.ts
+    '[::1]', // bracketed IPv6
+  ]) {
+    const raw = await rawRequest(Number(port), [
+      'GET /v1/models HTTP/1.1',
+      `Host: ${host}:${port}`,
+      `Authorization: Bearer ${shim.token}`,
+      'Connection: close',
+      '',
+      '',
+    ].join('\r\n'))
+    assert.match(
+      raw,
+      /^HTTP\/1\.1 200/,
+      `Host ${host} is loopback everywhere else; the shim must use the shared list. Got: ${raw.split('\r\n')[0]}`,
+    )
+  }
 })
 
 test('a non-loopback Origin is refused', async () => {
@@ -415,6 +448,45 @@ test('a hard upstream failure is a 502 and advertises no retry delay', async () 
     assert.strictEqual(headers['retry-after'], undefined)
   } finally {
     await broken.shim.close()
+  }
+})
+
+test('a stream that breaks after 200 is committed reports the failure in-band, then terminates', async () => {
+  // The non-streaming failure above cannot happen: no 200 was committed. The
+  // streaming path DOES commit — headers go out before the first pull settles
+  // — so a later break must travel in-band. What this pins: the OpenAI `data:`
+  // error frame (the one pi-ai's parser throws on) PRECEDES the conventional
+  // `[DONE]` terminator, which the parser never reaches. A `[DONE]` without
+  // that frame would read as a complete turn.
+  const brokenStream = async function* () {
+    yield {
+      id: 'x',
+      object: 'chat.completion.chunk',
+      created: 0,
+      model: 'ModelA',
+      choices: [{ index: 0, delta: { content: 'half' }, finish_reason: null }],
+    }
+    throw new Error('mid-stream blowup')
+  }
+  const instance = await startShim({ runChat: brokenStream })
+  try {
+    const { status, text } = await call(instance.base, '/v1/chat/completions', {
+      method: 'POST',
+      token: instance.token,
+      body: JSON.stringify({ model: 'ModelA', messages: [{ role: 'user', content: 'hi' }], stream: true }),
+    })
+    assert.strictEqual(status, 200, 'a stream is 200-committed before the first pull')
+    const frames = text.split('\n\n').filter((frame) => frame.length > 0)
+    const errorFrame = frames.find((frame) => frame.startsWith('data:') && JSON.parse(frame.slice(5)).error !== undefined)
+    assert.ok(errorFrame !== undefined, 'the failure must travel in-band as a data: error frame')
+    assert.match(errorFrame, /"code":\s*"upstream_error"/, 'a plain break is an upstream error, not a queue')
+    assert.strictEqual(frames[frames.length - 1], 'data: [DONE]', 'the stream still ends with the conventional terminator')
+    assert.ok(
+      frames.indexOf(errorFrame) < frames.length - 1,
+      'the error frame must precede [DONE], or the parser treats the turn as complete',
+    )
+  } finally {
+    await instance.shim.close()
   }
 })
 

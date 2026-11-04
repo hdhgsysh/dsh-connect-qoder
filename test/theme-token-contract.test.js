@@ -53,6 +53,37 @@ const STYLES = readFileSync(join(root, 'src', 'client', 'styles.ts'), 'utf8')
 const BUNDLE = readFileSync(join(root, 'lib', 'client.js'), 'utf8')
 
 /**
+ * Every client source file that can name a theme token.
+ *
+ * WHY MORE THAN styles.ts: `token-history-chart.tsx` colours its bars with
+ * `var(--dsw-alias-state-*, #hex)` written **inline in the component**, not in
+ * the stylesheet. That is how `--dsw-alias-state-info-primary` — a name the
+ * host has never defined — survived: every gate in this file reads STYLES, and
+ * the inline spelling is not in it. The chart rendered its fallback forever
+ * while the suite stayed green.
+ *
+ * Component inline styles are the easy place to make this mistake (no shared
+ * token list, no lint), so they are in scope here. New client files that name
+ * tokens must be added to this list, and the "verified" assertion below runs
+ * over all of them.
+ */
+// 递归扫 src/client 所有层级：将来把图表拆到 src/client/charts/xxx.tsx 这类子
+// 目录，里面的 inline var(--dsw-*) 也必须进覆盖面，否则又是 state-info 漏网那
+// 一幕（见上面的 WHY 注释）。
+function walk(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) return walk(full)
+    return /\.tsx?$/.test(entry.name) ? [readFileSync(full, 'utf8')] : []
+  })
+}
+
+const COMPONENTS = walk(join(root, 'src', 'client')).join('\n')
+
+/** All client-side token spellings: the stylesheet plus every component. */
+const ALL_CLIENT_SOURCES = `${STYLES}\n${COMPONENTS}`
+
+/**
  * Read the host's design-token vocabulary from the installed DSH runtime.
  *
  * The token vocabulary is a property of the installed host, not of this
@@ -89,13 +120,89 @@ function hostTokenSource() {
 
 const HOST_CSS = hostTokenSource()
 
+/**
+ * The tokens this card has already been checked against a real host.
+ *
+ * WHY AN INVENTORY, when a hardcoded token vocabulary is exactly what the
+ * comment above refuses to keep. The two lists answer different questions:
+ *
+ * - `HOST_CSS` answers "does the host define this name?" — authoritative, and
+ *   deliberately not copied into this file, because a copy would rot when the
+ *   host renames a token.
+ * - This list answers "has a human ever verified this name against the host?" —
+ *   which is the question the `HOST_CSS` assertions CANNOT ask on a machine
+ *   without the host installed, and that machine is CI.
+ *
+ * The realistic error this file exists to catch is a maintainer writing a token
+ * name from memory (the long-form `-warning-` slip below is exactly that). On a
+ * bare checkout the discovery assertions skip, so that error would sail through
+ * CI with nothing but a skipped test to show for it. Requiring an ADDITION to
+ * appear here means a new guess fails on every machine, while the existing
+ * entries never rot: they are names already confirmed against the host, and the
+ * `HOST_CSS` assertions remain the ones that notice if the host moves.
+ */
+const VERIFIED_TOKENS = [
+  '--dsw-alias-bg-layer-2',
+  '--dsw-alias-bg-layer-3',
+  // The rule that separates the plugin's own credential block from the desktop
+  // application's sign-in line (`device-login-panel.tsx`). Verified 2026-10-17
+  // against the installed host: 62 occurrences in
+  // `%LOCALAPPDATA%\Programs\DeepSeek Harness\resources\app.asar`. It is NOT in
+  // the two sources `hostTokenSource` reads on this machine (neither
+  // `dsh-client-ui-theme` nor `dsh-web-frontend` is unpacked into `$DSH_HOME`),
+  // which is why this note records the check rather than pointing at a file.
+  '--dsw-alias-border-l1',
+  '--dsw-alias-border-l2',
+  '--dsw-alias-brand-primary',
+  // Referenced by the host and used here as a border with a literal fallback;
+  // the host does not declare it in the stylesheet this gate reads, so it is
+  // recorded as a deliberate exception rather than presented as verified.
+  // docs/issues/12 carries the decision.
+  '--dsw-alias-label-dimmed',
+  '--dsw-alias-label-primary',
+  '--dsw-alias-label-secondary',
+  '--dsw-alias-label-tertiary',
+  // The "medium consumption" band of the 7-day token chart
+  // (`token-history-chart.tsx`). There is NO `--dsw-alias-state-info-*` in the
+  // host — verified 2026-10-18 by extracting the whole
+  // `@deepseek-ai/dsh-client-ui-theme/lib/client.js` chunk out of app.asar:
+  // the state aliases that exist are business / error / idle / success / warn,
+  // five families, `info` is not one of them. An earlier revision of the chart
+  // used `--dsw-alias-state-info-primary` and silently rendered its #3b82f6
+  // fallback forever. `business-primary` resolves to
+  // `--dsw-static-deepseek-500` = #4176e6, the host's own blue, so the mid band
+  // tracks the theme instead of pinning a literal.
+  '--dsw-alias-state-business-primary',
+  '--dsw-alias-state-error-primary',
+  '--dsw-alias-state-success-primary',
+  '--dsw-alias-state-warn-primary',
+]
+
+/**
+ * Say out loud when the host-shape assertions could not run.
+ *
+ * A skipped test is a green suite. Red line 5 ("new tokens must be checked
+ * against the host CSS") has exactly one mechanical guard, and on a machine
+ * without the host installed — which is CI — that guard is off. Leaving that
+ * fact in a per-test skip reason means it is visible only to whoever expands
+ * the reporter output; a line here is visible to everyone.
+ */
+if (HOST_CSS === null) {
+  console.log(
+    '[theme-token] the host stylesheet was not found on this machine, so the two\n' +
+    '[theme-token] host-shape assertions below are SKIPPED. Token spelling is still\n' +
+    '[theme-token] checked against VERIFIED_TOKENS, but "does the host define this\n' +
+    '[theme-token] name?" is NOT verified by this run (red line 5).',
+  )
+}
+
 /** Every `--dsw-*` custom property the card references, with a fallback. */
 function tokensIn(text) {
   return [...new Set([...text.matchAll(/var\((--dsw-[a-z0-9-]+)\s*,/g)].map((m) => m[1]))]
 }
 
 test('the card references no theme token the host never defines', { skip: HOST_CSS === null && 'host stylesheet not found on disk' }, () => {
-  const unknown = tokensIn(STYLES).filter((token) => !HOST_CSS.includes(token))
+  const unknown = tokensIn(ALL_CLIENT_SOURCES).filter((token) => !HOST_CSS.includes(token))
   assert.deepEqual(
     unknown,
     [],
@@ -103,14 +210,68 @@ test('the card references no theme token the host never defines', { skip: HOST_C
   )
 })
 
-test('the card does not use the long-form state token', () => {
+test('the long-form state token is used nowhere in the client, stylesheet or component', () => {
   // Asserted separately, and unconditionally, because this is the specific
   // trap: the long form is not merely undefined, it is a name that appears in
   // the host's own source, so a reader has no way to spot it by looking around.
-  assert.equal(
-    (STYLES.match(/--dsw-alias-state-warning-primary/g) ?? []).length,
-    0,
-    'the host token is the abbreviated --dsw-alias-state-warn-primary; the long form is never defined and always falls through to the literal',
+  // Scope is all client sources, not just styles.ts — the same trap in a
+  // component's inline style is exactly as fatal.
+  for (const [name, text] of [
+    ['sources', ALL_CLIENT_SOURCES],
+    ['lib/client.js', BUNDLE],
+  ]) {
+    assert.equal(
+      (text.match(/--dsw-alias-state-warning-primary/g) ?? []).length,
+      0,
+      `the host token is the abbreviated --dsw-alias-state-warn-primary; the long form is never defined and always falls through to the literal (found in ${name})`,
+    )
+  }
+})
+
+test('no client source names a state-info token, which the host does not define', () => {
+  // The chart's mid band used `--dsw-alias-state-info-primary` — a family that
+  // does not exist in the host at all (state aliases: business / error / idle /
+  // success / warn). Unlike the warn long form, nothing in the host ever writes
+  // this name, so the only way to catch it is to know the vocabulary. The fix
+  // was to move the band onto `--dsw-alias-state-business-primary`
+  // (deepseek-500 = #4176e6, the host's own blue).
+  for (const [name, text] of [
+    ['sources', ALL_CLIENT_SOURCES],
+    ['lib/client.js', BUNDLE],
+  ]) {
+    assert.equal(
+      (text.match(/--dsw-alias-state-info-/g) ?? []).length,
+      0,
+      `--dsw-alias-state-info-* is not a host token family; use --dsw-alias-state-business-primary for the mid band (found in ${name})`,
+    )
+  }
+})
+
+test('every token the card references has been verified against a host', () => {
+  // Runs everywhere, host installed or not — see `VERIFIED_TOKENS`. A token
+  // added from memory fails here even on a CI runner, which is the whole point:
+  // the `HOST_CSS` assertions above are skipped there. Scope is every client
+  // source (stylesheet + components), because inline `var(--dsw-*)` in a
+  // component is just as invisible as a typo in styles.ts — the chart proved it.
+  const unverified = tokensIn(ALL_CLIENT_SOURCES).filter((token) => !VERIFIED_TOKENS.includes(token))
+  assert.deepEqual(
+    unverified,
+    [],
+    `these tokens are not in VERIFIED_TOKENS, so no run has confirmed the host defines them: ${unverified.join(', ')}. ` +
+    'Check each against the host stylesheet (`hostTokenSource`, or the asar: ' +
+    '`%LOCALAPPDATA%\\Programs\\DeepSeek Harness\\resources\\app.asar`), then add it to the list with the evidence.',
+  )
+})
+
+test('VERIFIED_TOKENS carries no token the card has stopped using', () => {
+  // The other direction, so the inventory cannot quietly accumulate names that
+  // no longer appear: a list that only ever grows stops describing the card.
+  const referenced = tokensIn(ALL_CLIENT_SOURCES)
+  const stale = VERIFIED_TOKENS.filter((token) => !referenced.includes(token))
+  assert.deepEqual(
+    stale,
+    [],
+    `these entries are in VERIFIED_TOKENS but the card no longer references them: ${stale.join(', ')}`,
   )
 })
 
@@ -149,10 +310,18 @@ test('the shipped bundle carries the same token spelling as the source', () => {
   // `npm run verify` and needs a bundler installed. This assertion is the
   // cheap, dependency-free half: it catches the ordinary case where a styles
   // edit lands in src/ and lib/client.js is left behind, which is precisely
-  // how the stale bundle would otherwise reach a user.
+  // how the stale bundle would otherwise reach a user. Both token traps are
+  // checked here as well as in the source-scoped tests above, because the
+  // bundle is what a user actually runs.
+  const bundle = BUNDLE
   assert.equal(
-    (BUNDLE.match(/--dsw-alias-state-warning-primary/g) ?? []).length,
+    (bundle.match(/--dsw-alias-state-warning-primary/g) ?? []).length,
     0,
     'lib/client.js still carries the undefined long-form token; rebuild with `npm run build`',
+  )
+  assert.equal(
+    (bundle.match(/--dsw-alias-state-info-/g) ?? []).length,
+    0,
+    'lib/client.js still carries the undefined state-info family; rebuild with `npm run build`',
   )
 })

@@ -15,8 +15,8 @@
  * refresh timer sends — and reports only structural facts: top-level type,
  * key names, group value types, counts. No model names, no tokens.
  */
-import { REGIONS, loadCredential } from '../lib/credentials.js'
-import { modelListUrl, authHeaders } from '../lib/upstream.js'
+import { REGIONS, loadCredential } from '../src/host/credentials.ts'
+import { modelListUrl, authHeaders } from '../src/host/upstream.ts'
 
 /** Structural summary of one envelope: types and key names, never values. */
 function shapeOf(data) {

@@ -1,0 +1,20 @@
+{
+  "_meta": {
+    "region": "qoder-cn",
+    "kind": "userinfo",
+    "capturedAt": "2026-10-18T00:00:00.000Z",
+    "pluginShapeReader": "accepted",
+    "sanitized": true,
+    "note": "Seeded fixture. `readUserInfoShape` accepts the envelope either with an inner `data` object (this one) or with identity fields at the top level; the envelope wrapper is what `openapi.qoder.com.cn/api/v1/userinfo` answers with. Identity values are placeholders. Regenerate with `node probe/capture-fixtures.mjs` on a machine with a Qoder sign-in."
+  },
+  "body": {
+    "data": {
+      "id": "<redacted>",
+      "name": "<redacted>",
+      "nickname": "<redacted>",
+      "email": "<redacted>",
+      "member_type": "free",
+      "created_at": "2025-01-01T00:00:00.000Z"
+    }
+  }
+}

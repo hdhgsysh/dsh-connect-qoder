@@ -13,10 +13,15 @@
 
 ## 证据
 
-- `lib/upstream.js:26-40`（RSA 公钥、COSY 版本、客户端类型等协议常量）
-- `lib/upstream.js:160-167`（`MACHINE_OS` 的 darwin 分支缺失）
-- `lib/upstream.js:1043-1166`（队列等待预算——正是把"形状变化"吞成"排队"的地方）
+- `src/host/upstream/crypto.ts`（RSA 公钥）与 `src/host/upstream/client-constants.ts`（COSY 版本、客户端类型等协议常量）
+- `src/host/upstream/client-constants.ts` 的 `MACHINE_OS`（darwin 分支缺失）
+- `src/host/upstream/retry.ts`（队列等待预算——正是把"形状变化"吞成"排队"的地方）
 - `grep MACHINE_OS test/` → 0 命中
+
+> 行号已移除：旧引用写的是 `lib/upstream.js:160-167` 之类，那是**打包产物**的行号。
+> `lib/` 现在只有 `index.js`/`client.js` 两个文件，子模块的行号不再对应任何东西。
+> 按**符号名**查比按行号查可靠。
+> 2026-10-17 追加：上面三个文件原本都在 `src/host/upstream.ts` 里，拆分见 `docs/issues/22`。
 
 ## 修法
 
@@ -37,7 +42,7 @@
 "请求失败时什么都不说"，而这已由刷新失败标志覆盖。要不要额外保留一条独立心跳（用于上游长期静默
 不可达时也留痕）留待以后。
 
-**判别式写在 [`../../lib/upstream.js`](../../lib/upstream.js) 的 `readModelCatalogShape`**，
+**判别式写在 [`../../src/host/upstream/api-calls.ts`](../../src/host/upstream/api-calls.ts) 的 `readModelCatalogShape`**（拆分前在 `src/host/upstream.ts`，见 `docs/issues/22`），
 界线取自 [`../../probe/model-shape.mjs`](../../probe/model-shape.mjs) 的**实测**（两端真实账号）：
 
 | 收到 | 判定 | 理由（实测事实） |
@@ -49,7 +54,7 @@
 
 最后一行是关键：把形状钉在"我在 CN 上见过的全部分组"上，会把国际版的每一次例行响应都判成漂移。
 
-**不进队列**靠 `ProtocolShapeChangedError` 上的 `retryable = false`（[`../../lib/errors.js`](../../lib/errors.js)），
+**不进队列**靠 `ProtocolShapeChangedError` 上的 `retryable = false`（[`../../src/host/errors.ts`](../../src/host/errors.ts)），
 `queueWaitFor` 因此立即返回 `undefined`——这正是"插件坏了"被当成"在排队"耗掉两分钟预算的那一处。
 反方向也有断言：真实队列拒绝仍然照常等待。
 
@@ -62,6 +67,10 @@
 "请更新插件（重新登录没有用）"，且**不**显示时间戳——时间戳摆在"你的插件过时了"旁边会让人以为
 屏幕上的模型还是当前的。文案本身被断言（不许以"请重新登录"收尾），见 `test/protocol-shape-card.test.js`。
 
-**残留缺口**：`fetchModels` 之外的上游端点（usage / campaigns / userinfo）**没有**做信封形状分诊——
-它们各自只取自己那几个字段，形状变化的表现会是"字段读不到"而非漂移告警。chat 端点是最常打的一个，
-先分诊它。
+**残留缺口（2026-10-17 收尾）**：`fetchUsage` / `readCampaigns` / `fetchUserInfo` 的信封形状
+分诊已补齐（`readUsageShape` / `readCampaignsShape` / `readUserInfoShape`；`/usage` 回
+`unavailableReason`，`/account/confirm` 回 `kind`，campaigns 半边带 `campaignsShapeChanged`，
+卡片与胶囊的文案统一指向插件更新）。判定边界是「不误报」：空正文 `{}` 仍按"无可展示数据"，
+只有非空正文里一个已知字段都没有（重命名 / 换包装层）才报警——这样上游新增字段永远不需要
+跟着改判定，只有真正的形状变化会响。仍未做的是立项时的周期性心跳探测：模型目录每 30 分钟
+刷新一次，每轮都在跑分诊，再单开一条 6 小时探测没有独立收益。

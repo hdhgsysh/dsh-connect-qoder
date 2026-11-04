@@ -123,10 +123,10 @@ export interface CatalogEntry {
   maxInputTokens?: number
   defaultContextWindow?: number
   contextOptions?: unknown[]
-  priceFactor?: number
+  priceFactor?: number | undefined
   isFree?: boolean
   isDefault?: boolean
-  promotion?: Promotion
+  promotion?: Promotion | undefined
 }
 
 /**
@@ -140,10 +140,23 @@ export interface CatalogEntry {
  * `info` blob encrypted under a per-request AES key containing exactly these,
  * so a missing `userID` or `token` is not a degraded call — it produces a
  * signature the gateway will reject.
+ *
+ * Those identity fields are now declared rather than left to the
+ * `[field: string]: unknown` index signature that used to stand in for them.
+ * The index signature documented them in prose while giving the compiler
+ * nothing to check, and it also made this interface reject `LoadedCredential`
+ * — the type that actually flows in from `resolveCredential`. `region-gate`
+ * reads only `expired`, but the fields are listed so the type says what the
+ * doc says. Everything is optional because a region with no sign-in resolves
+ * to nothing at all and is filtered before this is read.
  */
 export interface ResolvedCredential {
   expired?: boolean
-  [field: string]: unknown
+  userID?: string
+  token?: string
+  name?: string
+  email?: string
+  machineID?: string
 }
 
 /**
@@ -155,6 +168,15 @@ export interface ResolvedCredential {
  * visible. `machineID` is the one that may legitimately be empty: it is a
  * machine fingerprint, and an absent one is sent as the empty string rather
  * than failing the request.
+ *
+ * The `[field: string]: unknown` index signature that used to sit here is gone
+ * on purpose. It contradicted the sentence above — an open record is exactly
+ * what this is documented not to be — and nothing ever read a credential by
+ * arbitrary key. What it *did* do was make the interface reject the richer
+ * `LoadedCredential` that is the actual source of every value here, because
+ * that one has no index signature: the mismatch stayed invisible only while
+ * both ends travelled through `any`. Removing it makes the plugin's own
+ * credential readable by the signing and chat paths with no cast at all.
  */
 export interface QoderCredential {
   userID: string
@@ -162,7 +184,6 @@ export interface QoderCredential {
   name?: string
   email?: string
   machineID?: string
-  [field: string]: unknown
 }
 
 /**
@@ -176,19 +197,54 @@ export interface CatalogLike {
   current(): unknown[]
   replace(entries: unknown[], now?: number): void
   fetchedAt?: number
+  /**
+   * The error from the last failed `save()`, if any.
+   *
+   * The store records a swallowed write rather than throwing — a read-only
+   * Home must not kill the panel — and `replace()` advances the in-memory copy
+   * regardless. The refresh fold reads this to keep "what the disk holds"
+   * honest: when it is set, the catalog the process is serving will not
+   * survive a restart, and that has to be visible instead of cleared.
+   */
+  lastSaveError?: unknown
+}
+
+/** The failure a refresh left behind, per-reason. The reason travels with the
+ * record, not a boolean: `credential` / `no-credential` / `fetch` are transient,
+ * a shape change is not, `persist` means the newest answer is on screen but
+ * will not survive a restart, and `daily-limit` is the one the user can neither
+ * fix nor retry (docs/issues/24-terminal-failure-status-codes.md) — it keeps its
+ * own reason so the card can say so instead of "temporary, try again". */
+export interface RefreshFailure {
+  reason: RefreshFailureReason
+  error?: unknown
 }
 
 /**
- * The failure a refresh left behind, per-reason.
+ * The reasons a refresh can leave the catalog unrefreshed.
  *
- * `credential` and `no-credential` and `fetch` are transient; a protocol shape
- * change is not, which is why the reason travels with the record instead of
- * being collapsed into a boolean.
+ * The array is the source of truth and the type is DERIVED from it, rather than
+ * the two being written out separately. They had already drifted: the list was
+ * declared in `catalog-refresh.ts` and referenced nowhere, while this interface
+ * typed `reason` as a bare `string` — so the client's `refreshNoticeKey` fell
+ * through to its `default` (which says "temporary, try again") for anything it
+ * did not recognise, and a sixth reason could be introduced with no compile
+ * error and no failing test anywhere.
+ *
+ * `as const` is what makes the derivation work: it keeps the element type as the
+ * literal union rather than widening to `string`.
  */
-export interface RefreshFailure {
-  reason: string
-  error?: unknown
-}
+export const REFRESH_FAILURE_REASONS = [
+  'credential',
+  'no-credential',
+  'fetch',
+  'persist',
+  'protocol-shape-changed',
+  'daily-limit',
+] as const
+
+/** One reason a refresh left the catalog unrefreshed. */
+export type RefreshFailureReason = (typeof REFRESH_FAILURE_REASONS)[number]
 
 /**
  * The runtime shape the pure refresh/catalog helpers operate on.
@@ -212,8 +268,8 @@ export interface RefreshableRuntime {
  * narrowing on `ok === true` is checked, not merely permitted.
  */
 export type CatalogOutcome =
-  | { ok: true; entries: unknown[] }
-  | { ok: false; reason: string; error?: unknown }
+  | { ok: true; entries: CatalogEntry[] }
+  | { ok: false; reason: RefreshFailureReason; error?: unknown }
 
 /**
  * A logger the plugin writes to, when the host supplies one.
@@ -470,8 +526,19 @@ export interface HostService {
  */
 export interface HostContext {
   logger: PluginLogger
-  /** `ctx.get` + undefined check is the older service-locator spelling. */
-  get?: (name: string) => any
+  /**
+   * `ctx.get` + undefined check is the older service-locator spelling.
+   *
+   * Answers `unknown`, not `any`: the name is a string the caller chooses, so
+   * there is no key-to-service mapping the compiler could check against, and
+   * every caller must narrow what it gets back. `any` let three call sites read
+   * arbitrary members off the answer with no check at all; `unknown` makes each
+   * one state the shape it expects, which is the only honest thing to do here —
+   * the services behind these names belong to peer packages this repository
+   * deliberately does not install, so inventing interfaces for them would be
+   * worse than the narrowing it replaces.
+   */
+  get?: (name: string) => unknown
   /**
    * Declare interest in services; the callback runs once they are ready.
    *
@@ -507,30 +574,32 @@ export interface HostContext {
    * "this is not callable" bug gets hidden behind a shrug.
    */
   llm: {
-    registerAdapter: (providerIds: string[], adapter: unknown) => (() => void) | undefined
-    registerConfigurableProviders: (providers: unknown) => (() => void) | undefined
+    /**
+     * Declared with an explicit `this`, because the host implementation is a
+     * `this`-bound method (`registerAdapter` runs `this.ctx.effect(...)`).
+     * `this: HostContext['llm']` (not `this: void`) is the guard: the receiver
+     * is mandatory, so a detached call is TS2684, not a runtime TypeError
+     * (docs/issues/20-llm-handoff-detached.md). */
+    registerAdapter(
+      this: HostContext['llm'],
+      providerIds: string[],
+      adapter: unknown,
+    ): (() => void) | undefined
+    registerConfigurableProviders(
+      this: HostContext['llm'],
+      providers: unknown,
+    ): (() => void) | undefined
   }
   settings?: {
     register?: (namespace: string, section: unknown) => unknown
-    configure?: (options: { auto: boolean }, fiber: unknown) => unknown
     /**
-     * The 0.1.6 spelling, kept alongside `configure` so ONE build spans both
-     * Host lines. `configure({auto:true})` is 0.1.7's auto-form presentation;
-     * `installSection` is 0.1.6's, and it is also the line that hands the
-     * plugin a live settings document through `setSource`. Neither is
-     * guaranteed, and the entry probes for each with `typeof … === 'function'`
-     * rather than assuming an order.
+     * The 0.2 line's auto-form presentation: it registers the settings
+     * surface derived from the Loader entry's config schema, and nothing
+     * else — no live source is handed back, because the live seam is the
+     * Config object the Loader swaps in place. Not guaranteed by the
+     * contract, so the entry probes with `typeof … === 'function'`.
      */
-    installSection?: (
-      ctx: HostContext,
-      namespace: string,
-      section: unknown,
-      config: unknown,
-      hooks: {
-        setSource: (source: unknown) => void
-        onChange: () => void
-      },
-    ) => unknown
+    configure?: (options: { auto: boolean }, fiber: unknown) => unknown
   }
   webServer?: HostService
 }

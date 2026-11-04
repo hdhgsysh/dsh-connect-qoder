@@ -17,6 +17,8 @@
  * of denying the app exists, and the keystore side lands on a correct path
  * rather than a wrong one.
  */
+// @ts-check
+
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
@@ -57,13 +59,15 @@ test('every platform answers with a real path, never the env var that does not e
   // The regression, stated as a property: on a non-Windows platform the answer
   // must not be empty and must not be Windows-shaped, because an empty root is
   // indistinguishable from "no app installed".
-  for (const [platform, expected] of [
+  /** @type {[NodeJS.Platform, string][]} */
+  const cases = [
     ['darwin', join(HOME, 'Library', 'Application Support')],
     ['linux', join(HOME, '.config')],
     // Anything unix-like follows the same XDG rule as Linux, which is the whole
     // reason it is not `process.platform === 'linux'`.
     ['freebsd', join(HOME, '.config')],
-  ]) {
+  ]
+  for (const [platform, expected] of cases) {
     const root = appDataRootFor(platform, { APPDATA: WINDOWS_ENV.APPDATA }, HOME)
     assert.notStrictEqual(root, '', `${platform} must resolve a real root`)
     assert.notStrictEqual(root, WINDOWS_ENV.APPDATA, `${platform} must not answer with %APPDATA%`)

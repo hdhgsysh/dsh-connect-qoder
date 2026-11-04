@@ -26,50 +26,58 @@
  * @module dsh-connect-qoder/account-payload
  */
 import { readAccountStateAsync } from './account-state.ts'
+import type { AccountRegion, AccountStateRecord } from './account-state.ts'
+import type { DeviceCredentialStatus } from './device-credential.ts'
 import { appDataRootFor } from './credentials.ts'
+import type { CredentialKind } from './credential-kind.ts'
 import { regionEnabledFor } from './preferences.ts'
+import type { Preferences } from './preferences.ts'
 
 /**
- * Build the account panel's answer for every region.
- *
- * Each record is one region's sign-in state PLUS `enabled` — whether that
- * region's provider is offered to DSH right now — and the response also carries
- * the whole `enabledRegions` map, because the panel's per-region switch posts a
- * complete map back on every flip. Both are resolved live so a save through the
- * settings pipeline shows up at the next render without a restart.
- *
- * `force` is what distinguishes the two callers: the GET reads with
- * `cachedOnly` (no unwrap — see issue 07; without it every panel render would
- * run a PowerShell child and stall the host on exactly the machines this panel
- * exists to explain), while "重读登录" reads for real. The SHAPE is identical
- * either way, which is why both share this function: a narrower reload body
- * once made the card follow every re-read with a second GET.
- *
- * @param options.regions - the region descriptors to report on.
- * @param options.settings - the live preferences snapshot.
- * @param options.force - read the store for real instead of from the key cache.
- * @param options.readAccountState - injected for tests; defaults to the async
- *   read this module imports.
- * @param options.appDataRoot - injected for tests; defaults to the resolved
- *   per-platform application-data root.
- * @param options.regionEnabled - injected for tests; defaults to the shared
- *   opt-out predicate.
+ * Build the account panel's answer for all regions: one record per region
+ * (sign-in state plus `enabled`) and the whole `enabledRegions` map, which the
+ * per-region switch posts back complete; both are read live, `force` reads for real.
  * @returns a promise of `{ regions, enabledRegions }`.
  */
 export interface BuildAccountPayloadOptions {
-  // Lenient shapes: the callers (lib/index.js) pass the plugin's own region
-  // descriptors and the live preferences snapshot, both richer than any type
-  // this extracted module should pin.
-  regions: any[]
-  settings: any
+  // The real types, not `any`. The comment that used to sit here said the
+  // callers pass shapes "richer than any type this extracted module should
+  // pin" — true when the caller was `lib/index.js`, which had no types at all.
+  // Both callers are TypeScript now, and each one's type is already imported
+  // here (the region descriptor by `account-state.ts`, the preferences
+  // snapshot by `preferences.ts`), so pinning them costs nothing and makes
+  // `region.id` / `enabledRegions` checked at the only call site.
+  regions: AccountRegion[]
+  settings: Preferences | undefined
   force?: boolean
   readAccountState?: (
-    region: any,
+    region: AccountRegion,
     appDataRoot: string,
     options?: { force?: boolean; cachedOnly?: boolean },
-  ) => Promise<unknown>
+  ) => Promise<AccountStateRecord>
   appDataRoot?: string
-  regionEnabled?: (preferences: any, regionId: string) => boolean
+  regionEnabled?: (preferences: Preferences | undefined, regionId: string) => boolean
+  /**
+   * What the panel should say about this region's device credential.
+   *
+   * Injected rather than imported so this module keeps naming only its
+   * peer-free collaborators, and optional so a caller with no device sources
+   * produces exactly the payload shape that existed before they did — the
+   * field is added, never `undefined`-valued, because the card distinguishes
+   * "absent" from "reported as none" and a `device: undefined` key would make
+   * every existing shape assertion in the suite fail for no reason.
+   */
+  deviceStatus?: (regionId: string) => DeviceCredentialStatus
+  /**
+   * Which credential path is serving this region, when the host knows.
+   *
+   * Injected for the same reason as `deviceStatus`, and optional for the same
+   * reason: a caller with no resolved credential produces exactly the payload
+   * shape that existed before, and the key is added only when there is a kind
+   * to report. `undefined` means "not resolved yet", not "no credential" — the
+   * card falls back to what it can infer when the key is absent.
+   */
+  credentialKind?: (regionId: string) => CredentialKind | undefined
 }
 
 export async function buildAccountPayload({
@@ -79,6 +87,8 @@ export async function buildAccountPayload({
   readAccountState = readAccountStateAsync,
   appDataRoot = appDataRootFor(),
   regionEnabled = regionEnabledFor,
+  deviceStatus,
+  credentialKind,
 }: BuildAccountPayloadOptions = {} as BuildAccountPayloadOptions) {
   const enabledRegions = Object.fromEntries(
     regions.map((region) => [region.id, regionEnabled(settings, region.id)]),
@@ -87,10 +97,21 @@ export async function buildAccountPayload({
   // about HOW it was read, the same way it is consistent about what it read.
   const mode = force === true ? { force: true } : { cachedOnly: true }
   const states = await Promise.all(
-    regions.map(async (region) => ({
-      ...(await readAccountState(region, appDataRoot, mode) as any),
-      enabled: enabledRegions[region.id],
-    })),
+    regions.map(async (region) => {
+      const kind = credentialKind?.(region.id)
+      return {
+        ...(await readAccountState(region, appDataRoot, mode)),
+        enabled: enabledRegions[region.id],
+        // The plugin's own credential is reported alongside the application's
+        // sign-in, not merged into it: they are two credentials with two
+        // lifetimes, and a region can be `signed-out` of the app while the
+        // plugin's own token is perfectly good.
+        ...(deviceStatus === undefined ? {} : { device: deviceStatus(region.id) }),
+        // Which path is actually serving this region. Absent when nothing has
+        // been resolved yet — the card then falls back to what it can infer.
+        ...(kind === undefined ? {} : { credentialKind: kind }),
+      }
+    }),
   )
   return { regions: states, enabledRegions }
 }

@@ -2,12 +2,13 @@
  * The settings save pipeline.
  *
  * Extracted from the `__save` route in lib/index.js so it can be tested. The
- * route's whole reason for existing is a defect on the DSH 0.1.7 line: the
- * client-side `settingsScope.set()` can resolve successfully without persisting
- * anything — the host's atomic write exhausts its retries on a locked file, the
- * scope reloads the previous document, and success is reported anyway. The card
- * would then show "已保存" while the model roster, image overrides and context
- * window had all silently failed to change, with nothing to indicate it.
+ * route's whole reason for existing is a defect on the DSH 0.2 line: the
+ * client-side settings scope `set()` can resolve successfully without
+ * persisting anything — the host's atomic write exhausts its retries on a
+ * locked file, the scope reloads the previous document, and success is
+ * reported anyway. The card would then show "已保存" while the model roster,
+ * image overrides and context window had all silently failed to change, with
+ * nothing to indicate it.
  *
  * So a write here is only a success once the value has been read back out of the
  * document and compared. That check, the per-region merge, and the namespace
@@ -26,7 +27,7 @@ export type SettingsRow = { ns?: unknown; value?: Record<string, unknown> } & Re
 /**
  * The host settings service, as much of it as this module touches.
  *
- * `mutate` and `describe` are the only two members read. On the 0.1.7 line a
+ * `mutate` and `describe` are the only two members read. On the 0.2 line a
  * `mutate` can resolve without persisting — that is the whole reason the read-back
  * check below exists — so the shape being declared here must not be read as a
  * promise that calling it wrote anything.
@@ -62,9 +63,10 @@ export const SAVE_FIELDS = {
 /**
  * Find the settings row this plugin owns.
  *
- * On 0.1.7 the service keys a provider's document by the provider name
- * (`llm-qoder`), while 0.1.6 and earlier use the plugin namespace
- * (`dsh-connect-qoder`). Both are matched exactly, in that order.
+ * On the 0.2 line the service keys a provider's document by the Loader
+ * entry id (`llm-qoder`), while a host that mounts the plugin without a
+ * Loader entry serves it under the plugin namespace (`dsh-connect-qoder`).
+ * Both are matched exactly, in that order.
  *
  * The substring fallbacks this replaced were a real hazard rather than a
  * theoretical one: `String(entry.ns).includes(name)` matches `llm-qoder-extra`,
@@ -86,7 +88,7 @@ export function findSettingsRow(rows: SettingsRow[], candidates: string[]): Sett
 /**
  * The settings namespace the HOST actually serves this plugin under.
  *
- * On the 0.1.7 line a plugin can no longer pick its namespace: the service
+ * On the 0.2 line a plugin can no longer pick its namespace: the service
  * derives it from the Loader entry and `describe()` reports it as
  * `ns: entry.options.id`. The host then looks a provider up by **exact** match
  * — the models settings page does `namespaces.get(entry.settingsNs)` — so a
@@ -150,7 +152,7 @@ export function readField(row: SettingsRow | undefined, field: string): unknown 
  *
  * The return value is the route's whole contract: `{ ok: true }` only when the
  * value is readable out of the document afterwards. A `mutate` that resolves is
- * not evidence of anything on the 0.1.7 line, so the document is re-read and
+ * not evidence of anything on the 0.2 line, so the document is re-read and
  * deep-compared against what was written.
  *
  * @param options.settings - the host settings service.
@@ -172,7 +174,7 @@ export async function applySettingsSave({
   field: unknown
   value: unknown
   candidates: string[]
-  equals?: EqualityFn
+  equals?: EqualityFn | undefined
 }): Promise<{ status: number; body: Record<string, unknown> }> {
   // `Object.hasOwn` rather than a plain lookup: a bare `SAVE_FIELDS[field]`
   // reaches the prototype chain, so `field: 'constructor'` (or `toString`,
@@ -237,6 +239,44 @@ export async function applySettingsSave({
   }
 
   return { status: 200, body: { ok: true, value: merged, readBack } }
+}
+
+/**
+ * The `__save` route's verdict, factored out so the service-absent case is
+ * assertable in a test.
+ *
+ * {@link applySettingsSave} assumes a live settings service. This is the OTHER
+ * failure: the host has no `settings` service for this fiber, so there is
+ * nothing to write through. It must answer 503 — a body the client can read —
+ * and not 404: the client tells the two apart and refuses to paper over a 404
+ * with an unverified snapshot, which is what showed a false "已保存" before the
+ * route was registered under `webServer` alone. See
+ * docs/issues/06-save-route-and-false-saved.md
+ *
+ * @param settings - the settings service, or `undefined`/`null` when absent.
+ * @param rawBody - the parsed request body; `field` and `value` are read off it
+ *   as `unknown`, exactly as the handler does.
+ * @param options.candidates - the namespaces to try, in priority order.
+ * @param options.equals - deep equality, injected so the module stays peer-free.
+ * @returns `{ status, body }` — the HTTP status and JSON payload the route sends.
+ */
+export async function saveFieldOutcome(
+  settings: SettingsService | null | undefined,
+  rawBody: unknown,
+  { candidates, equals }: { candidates: string[]; equals?: EqualityFn | undefined },
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  if (settings === undefined || settings === null) {
+    // The service is gone, not just the namespace: there is no document to write
+    // through at all. A 503 with a body is what the client distinguishes from a
+    // 404 (a host that does not serve the route at all) and refuse to paper over.
+    return { status: 503, body: { error: 'settings service unavailable to this fiber' } }
+  }
+  // `rawBody` is whatever the route's body reader produced: a parsed JSON value,
+  // or `undefined` for an empty body. `(rawBody ?? {})` gives a fresh object for
+  // the empty case so `posted.field` / `posted.value` read as `undefined` and fall
+  // into `applySettingsSave`'s 400, never a crash.
+  const posted = (rawBody ?? {}) as { field?: unknown; value?: unknown }
+  return applySettingsSave({ settings, field: posted.field, value: posted.value, candidates, equals })
 }
 
 /**

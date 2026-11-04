@@ -1,8 +1,9 @@
 {
   "name": "@eghrhegpe/dsh-connect-qoder",
   "displayName": "DSH Connect Qoder",
-  "description": "Bring the Qoder models already signed in on this machine into DeepSeek Harness with zero configuration.",
-  "version": "0.4.4",
+  "description": "Registers Qoder CN and international language models into DSH, fetching each model's rate automatically as it shifts with off-peak hours. It also provides a daily check-in, a usage pill and a credit lookup. Needs the Qoder login state on this machine, or one browser login.",
+  "version": "0.7.6",
+  "icon": "./icon.svg",
   "author": "eghrhegpe",
   "homepage": "https://github.com/eghrhegpe/dsh-connect-qoder",
   "repository": {
@@ -26,10 +27,21 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test \"test/*.test.js\"",
+    "test:card": "node --test test/card-dom.test.js",
+    "test:live": "node scripts/verify-live.mjs",
+    "probe:maxtokens": "node scripts/probe-max-tokens.mjs",
+    "probe:params": "node scripts/probe-params.mjs",
+    "probe:fixtures": "node probe/capture-fixtures.mjs",
     "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=68 --test-coverage-branches=82 --test-coverage-functions=66 \"test/*.test.js\"",
-    "verify": "npm run typecheck && npm run audit:any && npm run build && npm test && npm run verify:host && npm run verify:bundle",
-    "verify:deploy": "node scripts/check-deploy-drift.mjs",
+    "test:host-range": "node --test test/host-range.test.mjs",
+    "test:market-entry": "node test/market-entry.test.mjs",
+    "host-range:update": "node scripts/update-host-range.mjs",
+    "host-range:check": "node scripts/update-host-range.mjs --check",
+    "verify": "npm run typecheck && npm run audit:any && npm run audit:explicit:any && npm run audit:test-types && npm run audit:test-type-errors && npm run build && npm test && npm run test:market-entry && npm run verify:host && npm run verify:bundle",
     "audit:any": "node scripts/audit-implicit-any.mjs",
+    "audit:explicit:any": "node scripts/audit-explicit-any.mjs",
+    "audit:test-types": "node scripts/audit-test-types.mjs",
+    "audit:test-type-errors": "node scripts/audit-test-type-errors.mjs",
     "verify:host": "node scripts/verify-host-bundle.mjs",
     "verify:bundle": "node scripts/verify-bundle-behaviour.mjs",
     "build:host": "node scripts/clean-host-bundle.mjs && tsdown -c tsdown.config.mjs",
@@ -51,11 +63,16 @@
     "lib",
     "locale/*.json",
     "cordis.patch.yml",
+    "icon.svg",
     "README.md",
     "CHANGELOG.md"
   ],
   "devDependencies": {
     "@types/node": "^26.6.4",
+    "js-yaml": "^5.5.0",
+    "jsdom": "^30.1.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "tsdown": "^0.23.0",
     "typescript": "^5.9.3"
   },
@@ -71,7 +88,6 @@
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-slots",
         "@deepseek-ai/dsh-client-ui-settings-plugins",
         "@deepseek-ai/dsh-client-locale"
       ],
@@ -79,17 +95,16 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": ">=4.0.2 <5.0.0",
-    "@deepseek-ai/dsh-client-locale": ">=0.1.5 <0.3",
-    "@deepseek-ai/dsh-client-ui-settings": ">=0.1.5 <0.3",
-    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.5 <0.3",
-    "@deepseek-ai/dsh-home-paths": ">=0.1.5 <0.3",
-    "@deepseek-ai/dsh-host-webserver": ">=0.1.5 <0.3",
-    "@deepseek-ai/dsh-llm": ">=0.1.5 <0.3",
-    "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.5 <0.3",
-    "@deepseek-ai/dsh-settings": ">=0.1.5 <0.3",
-    "@deepseek-ai/schemastery": "^3.18.2",
-    "@earendil-works/pi-ai": "^0.85.1"
+    "@deepseek-ai/cordis": ">=4.0.4 <5.0.0",
+    "@deepseek-ai/dsh-client-locale": ">=0.2.0-rc.0 <0.3",
+    "@deepseek-ai/dsh-client-ui-settings": ">=0.2.0-rc.0 <0.3",
+    "@deepseek-ai/dsh-home-paths": ">=0.2.0-rc.0 <0.3",
+    "@deepseek-ai/dsh-host-webserver": ">=0.2.0-rc.0 <0.3",
+    "@deepseek-ai/dsh-llm": ">=0.2.0-rc.0 <0.3",
+    "@deepseek-ai/dsh-llm-pi-ai": ">=0.2.0-rc.0 <0.3",
+    "@deepseek-ai/dsh-settings": ">=0.2.0-rc.0 <0.3",
+    "@deepseek-ai/schemastery": "^3.18.3",
+    "@earendil-works/pi-ai": ">=0.85.0 <2.0.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {

@@ -193,39 +193,61 @@ test('a recorded failure always carries a reason', async () => {
   }
 })
 
-test('the async read does not block the event loop', async () => {
-  // The claim under test, stated as something that can fail: during the unwrap,
-  // other work must keep running. A synchronous reader would score ~0 ticks.
-  //
-  // The child is faked with a timer rather than a real PowerShell, so the timing
-  // is deterministic on a loaded CI machine — the property being asserted is
-  // "the loop ran while we waited", not "we waited N ms".
-  let ticks = 0
-  const timer = setInterval(() => {
-    ticks += 1
-  }, 5)
-  const dir = appDirWith(mkdtempSync(join(tmpdir(), 'qoder-async-')))
-  try {
-    setCredentialDiagnosticSink(() => {})
-    // A directory with a `Local State` but no `auth.v1.dat` reaches the unwrap
-    // and then finds nothing to decrypt — which is the expensive path, and the
-    // one this assertion is about.
-    const pending = loadCredentialAsync(REGION, join(dir, '..'))
-    // Yield twice: if the call blocked, control would not arrive here until it
-    // was finished, and `ticks` would still be 0.
-    await new Promise((resolve) => setImmediate(resolve))
-    const ticksAtReturn = ticks
-    await pending
-    assert.ok(
-      ticksAtReturn > 0,
-      'the event loop was frozen while the unwrap ran — this is the regression',
-    )
-  } finally {
-    clearInterval(timer)
-    setCredentialDiagnosticSink(undefined)
-    rmSync(join(dir, '..'), { recursive: true, force: true })
-  }
-})
+test(
+  'the async read does not block the event loop',
+  {
+    // Only Windows has a wait to observe. There the unwrap spawns a real
+    // PowerShell child (~100 ms), which is exactly the wait this asserts is not
+    // blocked. Everywhere else `defaultDpapiUnprotect` refuses the platform
+    // before awaiting anything, so the call settles without ever yielding —
+    // measured at 2.4 ms with the whole call inside the microtask queue (run
+    // 39304167878). Asserting a yield there asserts the runner's speed, which is
+    // what the previous 5 ms tick counter did: it failed on a green tree when a
+    // fast runner finished inside the interval (run 39302554281) and passed when
+    // the machine happened to be slow.
+    skip:
+      process.platform === 'win32'
+        ? false
+        : 'off Windows the unwrap is refused before any await — there is no wait to not-block',
+  },
+  async () => {
+    // The claim under test, stated as something that can fail: the call must
+    // hand control back to the loop before it finishes. A synchronous reader
+    // would run to completion inside the call, so nothing else could have run in
+    // between.
+    //
+    // The verdict is ORDER, not elapsed time — a macrotask cannot run before a
+    // promise that settled synchronously, because the `.then` continuation is a
+    // microtask and microtasks drain first. So "the immediate won the race" is
+    // exactly "the call yielded".
+    //
+    // The marker MUST be queued BEFORE the call. Queued after, it loses to an
+    // implementation that yields with its own `setImmediate` (that immediate was
+    // registered first, so it runs first in the same check phase) — which would
+    // fail a correct reader. Measured both orders against three shapes: sync,
+    // immediate-yielding and timer-yielding; only "marker first" separates the
+    // synchronous one from both asynchronous ones.
+    const dir = appDirWith(mkdtempSync(join(tmpdir(), 'qoder-async-')))
+    try {
+      setCredentialDiagnosticSink(() => {})
+      // A directory with a `Local State` but no `auth.v1.dat` reaches the unwrap
+      // and then finds nothing to decrypt — which is the path this assertion is
+      // about.
+      const marker = new Promise((resolve) => setImmediate(() => resolve('yielded')))
+      const settled = loadCredentialAsync(REGION, join(dir, '..')).then(() => 'settled')
+      const first = await Promise.race([settled, marker])
+      assert.strictEqual(
+        first,
+        'yielded',
+        'the async read settled before the loop got to run — this is the regression',
+      )
+      await settled
+    } finally {
+      setCredentialDiagnosticSink(undefined)
+      rmSync(join(dir, '..'), { recursive: true, force: true })
+    }
+  },
+)
 
 test('the async reader returns a promise, the sync one does not', async () => {
   // The shape difference callers depend on: `CredentialCache.resolve` awaits
@@ -284,7 +306,13 @@ test('both paths share one implementation, and differ only in the child spawn', 
   // on states reachable without a real PowerShell. What must not be possible is
   // for one path to grow its own copy of the temp-directory, zeroing or
   // failure-recording logic — that is how the two would drift, silently.
-  const source = readFileSync(new URL('../src/host/credentials.ts', import.meta.url), 'utf8')
+  //
+  // The source moved to `src/host/oscrypt-unwrap.ts` when the OSCrypt chain
+  // was split out of `credentials.ts`; this gate follows it there, and the
+  // assertions below now also pin the SEAM: both entries take the spawner as
+  // an argument, so the code between "temp dir created" and "key read back"
+  // can be exercised without a PowerShell child.
+  const source = readFileSync(new URL('../src/host/oscrypt-unwrap.ts', import.meta.url), 'utf8')
   assert.equal(
     (source.match(/function runUnwrap\(/g) ?? []).length,
     1,
@@ -298,17 +326,49 @@ test('both paths share one implementation, and differ only in the child spawn', 
   // the test is actually about — is still pinned exactly.
   assert.match(
     source,
-    /export function oscryptKeyFor\([^)]*\)[^{]*\{[\s\S]*?return runUnwrap\(appDir, options, spawnUnwrapSync\)/,
+    /export function oscryptKeyFor\([^)]*\)[^{]*\{[\s\S]*?return runUnwrap\(appDir, options, spawn\)/,
     'the sync entry must delegate to the shared body',
   )
   assert.match(
     source,
-    /export async function oscryptKeyForAsync\([^)]*\)[^{]*\{[\s\S]*?return runUnwrap\(appDir, options, spawnUnwrapAsync\)/,
+    /export async function oscryptKeyForAsync\([^)]*\)[^{]*\{[\s\S]*?return runUnwrap\(appDir, options, spawn\)/,
     'the async entry must delegate to the SAME body',
+  )
+  // The two entries differ ONLY in the spawner they fall back to: the sync one
+  // blocks, the async one does not. A future edit that gave either entry its
+  // own spawner default would break the equivalence this file exists to keep.
+  assert.match(
+    source,
+    /export function oscryptKeyFor\([^)]*spawn: UnwrapSpawn = spawnUnwrapSync[^)]*\)/,
+    'the sync entry must default to the blocking spawner',
+  )
+  assert.match(
+    source,
+    /export async function oscryptKeyForAsync\([^)]*spawn: UnwrapSpawn = spawnUnwrapAsync[^)]*\)/,
+    'the async entry must default to the non-blocking spawner',
   )
   // `execFileSync` must not survive anywhere on the async path.
   assert.match(source, /function spawnUnwrapAsync/)
   assert.match(source, /execFile\(powershell, args, options/)
+})
+
+test('the OSCrypt chain does not import the store half back', () => {
+  // The split is only worth anything if it is a split: `oscrypt-unwrap.ts` is
+  // the half that can write a secret outside the process, and it must not
+  // depend on the half that opens the user's sign-in store. A cycle here
+  // would also mean the two files could never be read on their own.
+  const chain = readFileSync(new URL('../src/host/oscrypt-unwrap.ts', import.meta.url), 'utf8')
+  assert.doesNotMatch(
+    chain,
+    /from '\.\/credentials\.ts'/,
+    'the OSCrypt chain must not import the store half',
+  )
+  const store = readFileSync(new URL('../src/host/credentials.ts', import.meta.url), 'utf8')
+  assert.doesNotMatch(
+    store,
+    /from '\.\/oscrypt-unwrap\.ts'\s*;\s*\n\s*import[^;]*from '\.\/oscrypt-unwrap\.ts'/,
+    'the store half must import the chain exactly once',
+  )
 })
 
 test('the hand-off file is removed on both paths, and never survives a failure', async () => {
@@ -356,6 +416,88 @@ test('the async path leaves no readable key material after it settles', async ()
         `a surviving ${name}/key.b64 must be empty, not carry the unwrapped key`,
       )
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Non-Windows hosts (KNOWN_GAPS §6)
+//
+// The unwrap is PowerShell + DPAPI, so there is nothing to run on macOS or
+// Linux. Before this branch existed, such a host spawned a child against a path
+// like `C:\Windows\System32\...\powershell.exe`, and the exec error it recorded
+// is what the account panel showed — a Windows path on a Mac, explaining
+// nothing. Worse, when the app really had no sign-in the same path reported
+// "no Local State file", and both answers ended in the card telling the user to
+// install an app they already have.
+// ---------------------------------------------------------------------------
+
+test('a non-Windows host is told the platform is the reason, not told to install an app', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'qoder-platform-'))
+  try {
+    const appDir = appDirWith(root)
+    await loadCredentialAsync(REGION, root, { platform: 'darwin' })
+
+    const reason = describeUnwrapFailure(appDir)
+    assert.ok(reason !== undefined, 'the failure must be recorded, or the card has nothing to say')
+    assert.match(
+      reason,
+      /only read the Qoder sign-in on Windows/,
+      `the reason must name the platform gap; got ${JSON.stringify(reason)}`,
+    )
+    assert.doesNotMatch(
+      reason,
+      /no Local State file/,
+      'reporting "no Local State file" here is the lie this branch exists to stop',
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a non-Windows host writes no hand-off directory at all', async () => {
+  // Checked BEFORE the temp directory is created, so a Mac spends nothing per
+  // request and never leaves a key file it cannot use.
+  const root = mkdtempSync(join(tmpdir(), 'qoder-platform-'))
+  const before = new Set(readdirNames(tmpdir()))
+  try {
+    appDirWith(root)
+    await loadCredentialAsync(REGION, root, { platform: 'darwin' })
+    const fresh = readdirNames(tmpdir())
+      .filter((name) => name.startsWith('qoder-oscrypt-') && !before.has(name))
+    assert.deepStrictEqual(fresh, [], 'the platform check must run before the hand-off directory is made')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('the reason names the platform it was asked about', async () => {
+  // Two unsupported platforms must not produce one identical sentence: the
+  // message is read by someone deciding whether the plugin works for them.
+  const root = mkdtempSync(join(tmpdir(), 'qoder-platform-'))
+  try {
+    const appDir = appDirWith(root)
+    await loadCredentialAsync(REGION, root, { platform: 'linux' })
+    assert.match(describeUnwrapFailure(appDir) ?? '', /linux/, 'the message must name the platform')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a Windows host is not refused by the platform check', async () => {
+  // The guard must key on the platform, not on "the unwrap looks hard" — on
+  // Windows it must still reach the spawn and return whatever the real unwrap
+  // returns. A refusal here would break the ONLY platform that works.
+  const root = mkdtempSync(join(tmpdir(), 'qoder-platform-'))
+  try {
+    const appDir = appDirWith(root)
+    await loadCredentialAsync(REGION, root, { platform: 'win32' })
+    assert.doesNotMatch(
+      describeUnwrapFailure(appDir) ?? '',
+      /only read the Qoder sign-in on Windows/,
+      'win32 must never be refused the way macOS is',
+    )
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

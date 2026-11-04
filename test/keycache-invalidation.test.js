@@ -17,6 +17,8 @@
  * unbounded cache survived. What is asserted here is the decision the unwrap
  * makes on every call, and the decision is the whole fix.
  */
+// @ts-check
+
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 

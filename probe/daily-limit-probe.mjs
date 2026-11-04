@@ -18,8 +18,8 @@
  * One request per region beyond the catalog read, and it spends at most one
  * token of allowance when the account has any left.
  */
-import { REGIONS, loadCredential, appDataRootFor } from '../lib/credentials.js'
-import { chatUrl, authHeaders, fetchModels, encodeBody } from '../lib/upstream.js'
+import { REGIONS, loadCredential, appDataRootFor } from '../src/host/credentials.ts'
+import { chatUrl, authHeaders, fetchModels, encodeBody } from '../src/host/upstream.ts'
 
 for (const region of REGIONS) {
   const credential = loadCredential(region, appDataRootFor())

@@ -10,8 +10,8 @@
  * them (403 / empty catalog). One GET per value, same request the plugin's
  * own refresh timer sends, one header differs.
  */
-import { REGIONS, loadCredential } from '../lib/credentials.js'
-import { modelListUrl, authHeaders } from '../lib/upstream.js'
+import { REGIONS, loadCredential } from '../src/host/credentials.ts'
+import { modelListUrl, authHeaders } from '../src/host/upstream.ts'
 
 const VALUES = ['x86_64_linux', 'x86_64_darwin', 'aarch64_darwin', 'aarch64_linux']
 

@@ -12,6 +12,8 @@
  * lock the three shapes the upstream actually emits (seconds, milliseconds,
  * RFC 3339) plus the invalid inputs that must yield `undefined`.
  */
+// @ts-check
+
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 

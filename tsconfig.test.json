@@ -1,0 +1,10 @@
+{
+  "$comment": "The type program for the TEST tree. The main tsconfig.json deliberately scopes itself to src/ (its `exclude` names `test`), which is why the suite used to run with no compiler involvement at all: the tests import `src/**/*.ts` through Node's strip-only loader, which erases the annotations without checking a single one. This file is the other half — it puts the test tree INTO a program, so the tests' own use of the API is type-checked, and so a broken import or a changed signature is caught by a compiler instead of by a runtime surprise. It is a SEPARATE program on purpose: `npm run typecheck` keeps meaning \"every src/**/*.ts is clean\", and the test program is its own gate (`npm run audit:test-types`) with its own scope. `allowJs: true` is what puts the .js test files into the program at all; `checkJs: false` is what keeps the ones that have not opted in from being CHECKED — a file opts in with a `// @ts-check` pragma, and the gate counts those files with a ratchet floor so the set can only grow. Do NOT set `checkJs: true` here: the whole tree is ~1900 errors deep and would need a budgeted migration, not a flag flip. The `exclude` below MUST be restated: `extends` inherits the parent's `exclude` (`[\"node_modules\",\"lib\",\"test\"]`), and an inherited `exclude` of `test` would leave this file naming `test` in `include` while the compiler silently compiles nothing — the gate would report zero errors and zero checked files, and look green. scripts/audit-test-types.mjs exists to make that state impossible to mistake for a pass.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": ["src/host", "src/client", "types/*.d.ts", "test"],
+  "exclude": ["node_modules", "lib"]
+}

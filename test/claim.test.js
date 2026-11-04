@@ -14,6 +14,8 @@
  * chosen so that deleting its guard turns something here red rather than
  * merely changing a number.
  */
+// @ts-check
+
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
@@ -39,7 +41,11 @@ const INSIDE_WINDOW_MS = (DAILY_ROUND_START_S + 3600) * 1000
 /** A clock after the round closed: 2026-09-27 10:30 UTC+8. */
 const AFTER_WINDOW_MS = (DAILY_ROUND_END_S + 1800) * 1000
 
-/** The claimable-benefit campaign, mid-round. `status` is swapped per test. */
+/**
+ * The claimable-benefit campaign, mid-round. `status` is swapped per test.
+ *
+ * @param {string} claimStatus
+ */
 const dailyRound = (claimStatus) => ({
   campaignId: '01a0cd41-eaea-76a8-9ab7-44d4666ba41d',
   campaignKey: 'act-20260923-267',
@@ -86,7 +92,11 @@ const VIEW_DETAILS_CAMPAIGN = {
   ],
 }
 
-/** Both campaigns, in the order the upstream returned them. */
+/**
+ * Both campaigns, in the order the upstream returned them.
+ *
+ * @param {...unknown} campaigns
+ */
 const payloadWith = (...campaigns) => ({ uid: '019ec931', showCampaign: true, claimable: false, campaigns })
 
 test('the claimable round is picked over the view-details promotion', () => {

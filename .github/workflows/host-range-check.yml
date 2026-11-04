@@ -1,0 +1,70 @@
+name: Host range check
+
+# Do our peer ranges still line up with the runtime versions that exist?
+#
+# `test/host-range.test.mjs` is the offline half: it compares the peer ranges in
+# package.json against a frozen universe of published `@deepseek-ai/dsh` versions
+# (test/host-range.golden.json) and fails, version by version, when they drift
+# apart. A frozen universe cannot notice a new release — it only knows what was
+# true when the golden was last written.
+#
+# This workflow is the other half: it asks the registry what exists NOW and
+# prints the difference. Nothing here decides anything — the generator writes
+# the golden, and a human reviews that diff, because "a new version appeared"
+# is not the same claim as "this plugin should accept that version".
+#
+# Why a clock:
+#
+#   The universe moves on the host's release schedule, not on ours. A per-push
+#   run measures our commit cadence, so a release that lands on a quiet week
+#   would stay unnoticed until the next unrelated commit. Alignment with the
+#   published set is a time-dependent property.
+#
+# Why its own workflow rather than a job in test.yml:
+#
+#   A red here is INFORMATION, not a regression. The fix is to run
+#   `node scripts/update-host-range.mjs` and review the diff (or to narrow the
+#   range on purpose). It must not sit on the same page as the offline hard
+#   gate, or the one signal that says BLOCK would blur into the one that says
+#   READ THIS.
+#
+# Why it installs nothing:
+#
+#   `scripts/update-host-range.mjs` only needs node's standard library plus
+#   `npm view`. The public `@deepseek-ai/dsh` package needs no auth, so there
+#   is no secret here either.
+#
+# Dispatchable so a red can be re-run by hand after the golden is refreshed.
+
+on:
+  schedule:
+    # 04:23 UTC = 12:23 CST, Mondays. Deliberately not 03:45 — that slot
+    # belongs to the submission-drift workflow, and two mails arriving together
+    # get skimmed as one. Two minutes after the sibling repositories' 04:17, so
+    # the five weekly mails arrive one by one rather than as a bundle.
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+  # These are the files that decide what the universe is compared against, so a
+  # change to any of them is worth one immediate run. Nothing else triggers it:
+  # this is not a gate on your work.
+  push:
+    paths:
+      - 'package.json'
+      - 'test/helpers/host-range.mjs'
+      - 'test/host-range.golden.json'
+      - 'scripts/update-host-range.mjs'
+      - '.github/workflows/host-range-check.yml'
+
+jobs:
+  host-range:
+    name: Peer ranges vs published runtime universe
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Prints the diff and exits 1 when the golden is stale. It does not write:
+      # refreshing the golden is a reviewed act, done on a machine, not by a bot.
+      - name: Compare the peer ranges with the published universe
+        run: node scripts/update-host-range.mjs --check

@@ -24,7 +24,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -42,7 +42,10 @@ function patchRow(key) {
   const yml = readFileSync(join(root, 'cordis.patch.yml'), 'utf8')
   // Accept quoted or bare scalars; the scoped '@' needs quoting in YAML, the
   // bare historical form did not, and both spellings mean the same string.
-  const match = yml.match(new RegExp(`^\\s*${key}:\\s*"?([^"\\n]+)"?\\s*$`, 'm'))
+  // The `- ` is a YAML sequence marker and lands directly before the FIRST key
+  // of the row (`- id: llm-qoder`), so it has to be allowed for — a row whose
+  // first key is not `id` never reaches this at all, but `id` does.
+  const match = yml.match(new RegExp(`^\\s*(?:-\\s+)?${key}:\\s*"?([^"\\n]+)"?\\s*$`, 'm'))
   assert.ok(match, `cordis.patch.yml must declare the row ${key}`)
   return match[1].trim()
 }
@@ -101,6 +104,65 @@ test('the card slots are registered under the current identity', () => {
   )
 })
 
+test('the served settings namespace is the Loader row id, in every place it is written', () => {
+  // The host derives the settings namespace from the Loader row's `id`
+  // (`settingsNamespaceOf` reads `ctx.fiber.entry.options.id`), so that id is
+  // what the host serves — and the client half cannot import the host module
+  // (two separate bundles). The value therefore has to be *written* twice, and
+  // the two copies can only be kept honest by comparing them.
+  //
+  // The failure this guards is silent in both directions. The models settings
+  // page resolves a provider's row by EXACT namespace match, so a client that
+  // registers copy or a card slot under a namespace the host does not serve
+  // makes the whole configuration surface vanish — no error, no log. That is
+  // what a stale `PROVIDER_NS` would cause after an id change, and it is the
+  // same shape as the 0.3.2 scoped rename that silently dropped the card.
+  const loaderId = patchRow('id')
+  const source = readFileSync(join(root, 'src', 'client', 'index.ts'), 'utf8')
+  const providerNs = source.match(/const PROVIDER_NS = "([^"]+)"/)
+  assert.ok(providerNs, 'src/client/index.ts must declare PROVIDER_NS')
+
+  assert.equal(
+    providerNs[1],
+    loaderId,
+    `the client looks up settings under "${providerNs[1]}" but the Loader row id is ` +
+      `"${loaderId}", so the host serves a namespace the client never matches — ` +
+      'resolveNamespace() falls back silently and the settings row disappears',
+  )
+
+  // Same check against the shipped artifact, so a stale bundle is caught by the
+  // test that already knows how to read it rather than only in review.
+  const built = readFileSync(join(root, 'lib', 'client.js'), 'utf8')
+  const builtNs = built.match(/PROVIDER_NS\s*=\s*"([^"]+)"/) ?? built.match(/const PROVIDER_NS = "([^"]+)"/)
+  assert.ok(builtNs, 'lib/client.js carries no readable PROVIDER_NS')
+  assert.equal(
+    builtNs[1],
+    loaderId,
+    'lib/client.js carries a stale PROVIDER_NS — run npm run build',
+  )
+})
+
+test('the host fallback namespace is the one the client falls back to', () => {
+  // The second copy of the pair: the host's `settingsNamespaceOf` fallback and
+  // the client's `resolveNamespace` fallback are the same string, and both are
+  // reached when a host mounts the plugin with no Loader entry. If they drift,
+  // a Loader-less host serves one namespace while the card registers under
+  // another — invisible, again.
+  const hostSource = readFileSync(join(root, 'src', 'host', 'index.ts'), 'utf8')
+  const hostFallback = hostSource.match(/export const QODER_SETTINGS_NS = '([^']+)'/)
+  assert.ok(hostFallback, 'src/host/index.ts must declare QODER_SETTINGS_NS')
+
+  const clientSource = readFileSync(join(root, 'src', 'client', 'index.ts'), 'utf8')
+  const clientFallback = clientSource.match(/const fallback = "([^"]+)"/)
+  assert.ok(clientFallback, 'src/client/index.ts must declare its resolveNamespace fallback')
+
+  assert.equal(
+    clientFallback[1],
+    hostFallback[1],
+    'the two fallbacks must be the same string: they are both reached on a host with no Loader entry',
+  )
+})
+
 test('the build script derives the loader id instead of hardcoding it', () => {
   // The one edit a rename should require is package.json. The wrapper header
   // reads it; the moment someone writes a literal back, this test says so.
@@ -115,4 +177,35 @@ test('the build script derives the loader id instead of hardcoding it', () => {
     /id:\s*"@?[\w/-]+",\s*\n?\s*'?\s*\\t?factory/m,
     'build-client.mjs must not hardcode a loader id literal in the bundle header',
   )
+})
+
+test('the client bundle guard pins every plugin route and every mounted panel', () => {
+  // The bundle guard (scripts/build-client.mjs) refuses to write an artifact
+  // that lost a string the card needs. A PINNED set that quietly misses one
+  // route is the same silence with a smaller footprint: the route vanishes
+  // from the bundle, the guard stays green, and the button that used it stops
+  // working. The route table has exactly one source of truth
+  // (src/client/paths.ts) — so the guard has to cover ALL of it, and the
+  // panels have to be covered by the same rule.
+  const paths = readFileSync(join(root, 'src', 'client', 'paths.ts'), 'utf8')
+  const script = readFileSync(join(root, 'scripts', 'build-client.mjs'), 'utf8')
+
+  const routes = [...paths.matchAll(/export const \w+ = "(\/plugins\/dsh-connect-qoder\/[^"]+)"/g)].map((m) => m[1])
+  assert.ok(routes.length >= 9, `the route table must be read from paths.ts; found ${routes.length}`)
+  for (const route of routes) {
+    assert.ok(script.includes(`'${route}'`), `the bundle guard must pin the ${route} route`)
+  }
+
+  // Every panel the client can mount: the `Qoder*` components are the surfaces
+  // the host renders, and each of them has to survive the build.
+  const panels = new Set()
+  for (const name of readdirSync(join(root, 'src', 'client'))) {
+    if (!name.endsWith('.tsx')) continue
+    const source = readFileSync(join(root, 'src', 'client', name), 'utf8')
+    for (const match of source.matchAll(/function (Qoder\w+)\(/g)) panels.add(match[1])
+  }
+  assert.ok(panels.size >= 4, `the panel set must be read from src/client; found ${[...panels].join(', ')}`)
+  for (const panel of panels) {
+    assert.ok(script.includes(`function ${panel}(`), `the bundle guard must pin the ${panel} component`)
+  }
 })

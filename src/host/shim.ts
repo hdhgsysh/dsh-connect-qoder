@@ -17,8 +17,11 @@ import { createServer } from 'node:http'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { streamChat, toQoderMessages, toQoderTools } from './upstream.ts'
 import { filterByEnabled } from './catalog-entry.ts'
-import { isStaleCredentialError } from './errors.ts'
+import { describeThrown, isStaleCredentialError, thrownFlag } from './errors.ts'
 import { writeError, sendJson } from './http-utils.ts'
+// The one loopback set. `routes.ts` imports only `http-utils.ts` and
+// `errors.ts`, so this edge introduces no cycle.
+import { isLoopbackAuthority } from './routes.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type {
   CatalogEntry,
@@ -62,6 +65,23 @@ export interface ShimOptions {
   logger?: PluginLogger
   /** Injected so a test can force a queue rejection without the real gateway. */
   runChat?: RunChat
+  /**
+   * 本地请求计数器。每次对话轮（调 `runChat` 之前）在此 +1——重试是同一轮内部
+   * 的事，不重复计；撞到每日限流时调 `markExhausted` 标记本地估计。挂 `undefined`
+   * 时静默跳过（不阻塞对话），由宿主决定是否启用。
+   */
+  requestCounter?: {
+    bump(region: string): { count: number | null; day: string | null }
+    markExhausted(region: string): void
+  }
+  /**
+   * 本地 token 消耗累加器。shim 抓到上游 usage 帧（`chunk.usage` 里的
+   * `total_tokens` / `cached_tokens`）时在此累加——这是上游**每轮都明确下发**的
+   * 真实 token 数，本地只是聚合，不编造。挂 `undefined` 时静默跳过。
+   */
+  tokenCounter?: {
+    addUsage(region: string, usage: unknown): { total: number | null; cached: number | null; day: string | null }
+  }
 }
 
 /** The live shim handle a region's runtime holds. */
@@ -76,8 +96,17 @@ export interface ShimHandle {
 /** Reject anything that is not addressed to the loopback interface. */
 function hostIsLoopback(host: unknown): boolean {
   if (typeof host !== 'string') return false
-  const name = host.startsWith('[') ? host.slice(1, host.indexOf(']')) : host.split(':')[0]
-  return name === '127.0.0.1' || name === 'localhost' || name === '::1'
+  // Delegated rather than re-spelled. This used to test the name against
+  // `'127.0.0.1' | 'localhost' | '::1'` on its own, which had already drifted
+  // from `routes.ts`'s copy in three ways: `127.0.0.2` was accepted by the card
+  // routes and refused here, `LocalHost` was case-folded there but not here, and
+  // a bare `::1` (no brackets) split to the empty string here and was accepted
+  // there. `isLoopbackAuthority` says in its own doc that it exists so "the
+  // loopback set is one list rather than a condition repeated in two places" —
+  // this is that one list, and the shim is the copy it was written for. It
+  // matters more here than anywhere else: this is the only surface that listens
+  // on a real port and holds a real token.
+  return isLoopbackAuthority(host)
 }
 
 /** Reject any request that claims a non-loopback origin. */
@@ -85,8 +114,13 @@ function originIsLoopback(origin: unknown): boolean {
   if (origin === undefined) return true
   if (typeof origin !== 'string') return false
   try {
-    const host = new URL(origin).hostname
-    return host === '127.0.0.1' || host === 'localhost' || host === '::1'
+    // `URL.hostname` has brackets stripped off an IPv6 literal, which is exactly
+    // what `isLoopbackAuthority` expects, so the shared list applies unchanged.
+    // Unlike `routes.loopbackRequest` this checks the name only, not the port:
+    // the shim is a fixed private surface, and the token is what actually gates
+    // it — an origin match here is a cheap early refusal, not the security
+    // boundary.
+    return isLoopbackAuthority(new URL(origin).hostname)
   } catch {
     return false
   }
@@ -228,6 +262,8 @@ export function createQoderShim(options: ShimOptions): ShimHandle {
     // on demand — and a 503 that carried no `Retry-After` was exactly the kind
     // of regression that would ship unnoticed.
     runChat = streamChat,
+    requestCounter,
+    tokenCounter,
   } = options
   const SHARED_SECRET = randomBytes(32).toString('base64url')
 
@@ -312,7 +348,7 @@ export function createQoderShim(options: ShimOptions): ShimHandle {
     let credential: ShimCredential | null | undefined
     try {
       credential = await resolveCredential()
-    } catch (error: any) {
+    } catch (error) {
       writeError(res, 401, 'not_signed_in', String(error))
       return
     }
@@ -330,8 +366,8 @@ export function createQoderShim(options: ShimOptions): ShimHandle {
     let body: ChatRequestBody
     try {
       body = JSON.parse((await readBody(req)).toString('utf8')) as ChatRequestBody
-    } catch (error: any) {
-      if (error?.name === 'BodyTooLargeError') {
+    } catch (error) {
+      if (thrownFlag(error, 'name') === 'BodyTooLargeError') {
         writeError(res, 413, 'payload_too_large', 'request body exceeds the 20 MiB limit')
         return
       }
@@ -377,11 +413,15 @@ export function createQoderShim(options: ShimOptions): ShimHandle {
     let iterator: ChatStream
     let first: IteratorResult<UpstreamChunk>
     try {
+      // 本地口径：每次对话轮在真正发往上游前 +1。重试是同一轮内部的事，计数只算
+      // 一发；计数器缺失（宿主未启用）则静默跳过，不阻塞对话链路（红线 1：计数
+      // 失败不得把对话也拖垮）。
+      requestCounter?.bump(region.id)
       iterator = runChat(region, credential, request, controller.signal)
       // Pull the first chunk before committing to a status code, so an auth or
       // quota failure surfaces as an HTTP error rather than a broken stream.
       first = await iterator.next()
-    } catch (error: any) {
+    } catch (error) {
       logger?.warn?.(`dsh-connect-qoder: ${region.displayName} upstream failed`, error)
       // Queueing is transient, so it must not look like a rejection. DSH
       // retries a 503 (RATE_LIMIT/SERVER); it refuses to retry a 403, and the
@@ -395,13 +435,13 @@ export function createQoderShim(options: ShimOptions): ShimHandle {
       if (signInStale) {
         invalidateCredential?.()
       }
-      if (error?.retryable === true) {
+      if (thrownFlag(error, 'retryable') === true) {
         // The queue hint travels as a header as well as in the body: the host
         // honours an HTTP `Retry-After` (capped at 20 s), and the plugin's own
         // queue wait may already be spent — handing the number over costs
         // nothing and lets the host's retry land inside the queue window
         // instead of on a blind backoff.
-        writeError(res, 503, 'rate_limit', String(error?.message ?? error), retryAfterHeader(error))
+        writeError(res, 503, 'rate_limit', describeThrown(error), retryAfterHeader(error))
         return
       }
       // A spent daily allowance is not an upstream malfunction, so it is not
@@ -411,11 +451,14 @@ export function createQoderShim(options: ShimOptions): ShimHandle {
       // deliberately carries NO `Retry-After`, because advertising an hour-long
       // delay on something that must not be retried is what produced the
       // original symptom ("重试延迟：7350 毫秒" on a request no retry could fix).
-      if (error?.dailyLimit === true) {
-        writeError(res, 429, 'daily_limit_exceeded', String(error?.message ?? error))
+      if (thrownFlag(error, 'dailyLimit') === true) {
+        // 本地口径：撞到每日限流，把今日标记为「额度疑似用尽」。这是本插件的本地推断
+        // （上游只报「用完了」），卡片会诚实标注「仅供参考」。计数器缺失时静默跳过。
+        requestCounter?.markExhausted(region.id)
+        writeError(res, 429, 'daily_limit_exceeded', describeThrown(error))
         return
       }
-      writeError(res, 502, 'upstream_error', String(error?.message ?? error))
+      writeError(res, 502, 'upstream_error', describeThrown(error))
       return
     }
 
@@ -429,7 +472,12 @@ export function createQoderShim(options: ShimOptions): ShimHandle {
       let usage: unknown
       for (let step = first; !step.done; step = await iterator.next()) {
         // The usage frame carries no choice, so it is collected separately.
-        if (step.value?.usage !== undefined && step.value.usage !== null) usage = step.value.usage
+        if (step.value?.usage !== undefined && step.value.usage !== null) {
+          usage = step.value.usage
+          // 本地口径：上游每轮明确下发的 token 数，聚合进今日文件（不编造）。
+          // 帧无效 / 计数器缺失时静默跳过，不阻塞对话（红线 1）。
+          tokenCounter?.addUsage(region.id, step.value.usage)
+        }
         absorb(step.value, content, toolCalls, (f) => { finish = f })
       }
       const message: Record<string, unknown> = { role: 'assistant', content: content.join('') }
@@ -471,6 +519,9 @@ export function createQoderShim(options: ShimOptions): ShimHandle {
         // reported no tokens. Qoder's usage block also carries `credits` and
         // `prompt_tokens_details.cached_tokens`, which pi-ai understands.
         if (chunk?.usage !== undefined && chunk.usage !== null) {
+          // 本地口径：上游每轮明确下发的 token 数，聚合进今日文件（不编造）。
+          // 帧无效 / 计数器缺失时静默跳过，不阻塞对话（红线 1）。
+          tokenCounter?.addUsage(region.id, chunk.usage)
           writeSse(res, {
             id,
             object: 'chat.completion.chunk',
@@ -484,7 +535,10 @@ export function createQoderShim(options: ShimOptions): ShimHandle {
         const choice = chunk?.choices?.[0]
         if (choice === undefined) continue
         const delta = choice.delta ?? choice.message ?? {}
-        const out: any = { role: 'assistant' }
+        // The assistant turn is assembled key by key, and only the keys the
+        // upstream actually sent are set — so this is a record of unknowns, not
+        // `any`: each `if` above is what proves the value it assigns.
+        const out: Record<string, unknown> = { role: 'assistant' }
         if (typeof delta.content === 'string' && delta.content.length > 0) out.content = delta.content
         // pi-ai reads reasoning from any of these fields.
         const reasoning = delta.reasoning_content ?? delta.reasoning
@@ -504,16 +558,21 @@ export function createQoderShim(options: ShimOptions): ShimHandle {
           choices: [{ index: 0, delta: out, finish_reason: finish ?? null }],
         })
       }
-    } catch (error: any) {
-      // Never end a broken stream with [DONE]: that tells the client the
-      // response finished normally, so a half-written answer is shown as a
-      // complete turn. Emitting the failure lets DSH retry or report it.
+    } catch (error) {
+      // The stream is already 200-committed, so the failure cannot be a status
+      // code: it travels in-band as an OpenAI `data:` error frame (below).
+      // THAT frame is what makes the client treat the turn as failed — pi-ai's
+      // parser (the OpenAI SDK's `Stream.fromSSEResponse`) throws an `APIError`
+      // at a chunk carrying an `error` field and stops iterating, so the
+      // conventional `[DONE]` written after the frame is never parsed. A broken
+      // stream WITHOUT the error frame is the dangerous shape: its clean
+      // `[DONE]` makes a half-written answer read as a complete turn.
       logger?.warn?.(`dsh-connect-qoder: ${region.displayName} stream broke`, error)
-      const retryable = error?.retryable === true
+      const retryable = thrownFlag(error, 'retryable') === true
       // A spent daily allowance gets its own kind so the in-band frame says so,
       // rather than being lumped in with genuine upstream faults.
-      const kind = retryable ? 'rate_limit' : error?.dailyLimit === true ? 'daily_limit_exceeded' : 'upstream_error'
-      const message = String(error?.message ?? error)
+      const kind = retryable ? 'rate_limit' : thrownFlag(error, 'dailyLimit') === true ? 'daily_limit_exceeded' : 'upstream_error'
+      const message = describeThrown(error)
       // A sign-in rejection means the cached credential is stale; force the
       // next resolveCredential to re-read the app's store so a re-sign-in is
       // picked up without a DSH restart. The error carries `signInExpired`
@@ -533,6 +592,10 @@ export function createQoderShim(options: ShimOptions): ShimHandle {
       // `event: error` line: OpenAI SSE carries no event types, and a strict
       // parser would drop or mis-handle it. The error object alone is enough.
       res.write(`data: ${JSON.stringify({ error: { message, type: kind, code: kind } })}\n\n`)
+      // The terminator follows the error frame, not instead of it: the parser
+      // rejects the stream at the frame above and never reaches this line, so
+      // it costs nothing and keeps the stream well-formed for any reader that
+      // does not honour in-band errors.
       res.write('data: [DONE]\n\n')
       res.end()
       return
@@ -582,7 +645,11 @@ export function createQoderShim(options: ShimOptions): ShimHandle {
       closed = true
       closedPromise = new Promise<void>((resolve, reject) => {
         server.closeAllConnections()
-        server.close((err: any) => {
+        // `server.close` answers a Node `Error | undefined`. Typed that way
+        // rather than `any`: the `err.code` read below is only safe because
+        // `err` is truthy-checked first, and the annotation is what lets the
+        // compiler confirm the check is the only read that needs it.
+        server.close((err?: Error & { code?: string }) => {
           if (err && err.code !== 'ERR_SERVER_NOT_RUNNING') reject(err)
           else resolve()
         })

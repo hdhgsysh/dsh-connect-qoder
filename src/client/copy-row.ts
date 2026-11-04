@@ -15,6 +15,9 @@ export const zhRow = {
 	"row.save": "保存",
 	"row.saving": "保存中…",
 	"row.saved": "已保存",
+	// The 404-legacy save: the value reached the settings scope's own snapshot
+	// but the host endpoint did not confirm it, so "已保存" would be a lie.
+	"row.savedUnconfirmed": "已保存（未确认）",
 	"row.discard": "撤销更改",
 	"row.unsaved": "有未保存的更改",
 	"row.failed": "保存失败",
@@ -33,7 +36,13 @@ export const zhRow = {
 	"row.enabledCount": "已勾选 {count} / {total}",
 	"row.rateFree": "免费",
 	"row.rateLabel": "倍率",
-	"row.refreshModels": "刷新计费",
+	// Two refreshes used to sit on one card under three different names —
+	// "刷新" (usage), "刷新计费" (catalog) and "重新读取登录状态" (sign-in) —
+	// so a user whose numbers looked wrong had to guess which one to press.
+	// The sign-in one is a genuinely different action and keeps its own name;
+	// these two now say WHAT they refresh. "刷新计费" was the worst of them:
+	// the route re-reads the model catalog, and the rates ride along with it.
+	"row.refreshModels": "刷新模型目录",
 	"row.refreshing": "正在刷新…",
 	"row.refreshed": "已更新（{time}）",
 	// Issue 05: the host now ships the fetch time and names a stale region,
@@ -43,9 +52,30 @@ export const zhRow = {
 	// user through a ritual that cannot possibly work.
 	"row.refreshStale": "上次更新：{time}（刷新失败）",
 	"row.refreshFailed": "刷新失败：{reason}",
+	"row.refreshNotPersisted": "已刷新，但写盘失败——重启后会回到旧目录（下次刷新会自动重试）",
 	"row.protocolChanged": "Qoder 的接口返回了本插件不认识的格式——请更新插件（重新登录没有用）",
+	// Issue 24: the third verdict that is neither "try again" nor "update the
+	// plugin" — upstream says this account's daily allowance is spent. The
+	// wording names the reset because that is the only thing the user can wait
+	// for, and explicitly rules out the two remedies the neighbouring strings
+	// offer (re-signing in, updating), so a refused catalog does not send
+	// anyone through a ritual that cannot work.
+	"row.refreshDailyLimit": "上游说今日额度已用尽——要等零点重置（不是登录问题，也不用更新插件）",
+	"row.refreshDailyLimitStale": "上次更新：{time}（今日额度已用尽）",
+	// Issue 20's leftover: activation survives a provider-registration failure
+	// now, so the roster renders even when the provider half is dead. The card
+	// has to say so, or the list below reads as usable and the chat picker
+	// silently disagrees with it. `{reason}` is the host's own error name
+	// (never empty) and the last clause sends the user to the log instead of
+	// offering a re-sign-in ritual that cannot fix this.
+	"row.providerRegistrationFailed": "插件启动时模型 provider 注册失败（{reason}）：下面的模型在对话里选不到。完整错误已写入宿主日志。",
 	"row.offPeakOn": "错峰价",
 	"row.offPeakOff": "标准价",
+	// The badge names the boundary the rate flips at, not a countdown to it:
+	// "错峰价 至 08:00" / "标准价 22:00 起". The precise countdown stays in the
+	// badge's tooltip, where it is read on demand instead of ticking on screen.
+	"row.offPeakEnd": "至 {time}",
+	"row.offPeakStart": "{time} 起",
 	"row.offPeakUntil": "{time} 后切换",
 	"row.offPeakHint": "错峰时段 {window}（{zone}）享受折扣；倍率按当前时段显示，到点会自动变化。",
 	// Search, error retry, and the Escape-to-collapse affordance.
@@ -53,8 +83,20 @@ export const zhRow = {
 	"row.searchPlaceholder": "输入模型名…",
 	"row.searchEmpty": "没有匹配的模型。",
 	"row.retry": "重试",
-	"row.filterCount": "显示 {visible} / {total} · 已勾选 {ticked}",
-	"row.clearFilter": "清除筛选"
+	// Split in two so the two facts can carry different weight: how many rows
+	// the filter left on screen is bookkeeping, how many of them will actually
+	// reach DSH's model picker is the number the user is here to set.
+	"row.filterCount": "显示 {visible} / {total}",
+	"row.filterTicked": "已勾选 {ticked}",
+	"row.clearFilter": "清除筛选",
+	// The per-row image-input selects are the card's single largest source of
+	// noise: fourteen rows each printing "跟随目录", a value that says "nothing
+	// was set". They are now behind this switch. It is a VIEW switch, not a
+	// setting — it never dirties the card — and a model already carrying an
+	// override stays visible even with it off: hiding a value the user set
+	// would be worse than the noise.
+	"row.imageTuning": "按模型微调图像输入",
+	"row.imageTuningTitle": "默认关闭：所有模型跟随 Qoder 目录声明的视觉能力。开启后可以为每个模型单独强制开启或关闭；已经改过的模型始终显示。"
 };
 /** English — model row copy. */
 export const enRow = {
@@ -73,6 +115,9 @@ export const enRow = {
 	"row.save": "Save",
 	"row.saving": "Saving…",
 	"row.saved": "Saved",
+	// The 404-legacy save: only the scope's snapshot saw the value, so the
+	// host did not confirm it and a clean "Saved" would be a lie.
+	"row.savedUnconfirmed": "Saved (unconfirmed)",
 	"row.discard": "Discard changes",
 	"row.unsaved": "Unsaved changes",
 	"row.failed": "Save failed",
@@ -91,14 +136,20 @@ export const enRow = {
 	"row.enabledCount": "{count} of {total} checked",
 	"row.rateFree": "free",
 	"row.rateLabel": "Rate",
-	"row.refreshModels": "Refresh rates",
+	"row.refreshModels": "Refresh the model catalog",
 	"row.refreshing": "Refreshing…",
 	"row.refreshed": "Updated ({time})",
 	"row.refreshStale": "Last updated: {time} (refresh failed)",
 	"row.refreshFailed": "Refresh failed: {reason}",
+	"row.refreshNotPersisted": "Refreshed, but the catalog could not be written — it will revert after a restart (the next refresh retries automatically)",
 	"row.protocolChanged": "Qoder replied in a format this plugin does not recognise — update the plugin (signing in again will not help)",
+	"row.refreshDailyLimit": "Upstream says today's allowance is spent — it resets at midnight (this is not a sign-in problem, and updating will not help)",
+	"row.refreshDailyLimitStale": "Last updated: {time} (today's allowance is spent)",
+	"row.providerRegistrationFailed": "The model provider failed to register when the plugin started ({reason}): the models below cannot be picked in chat. The full error is in the host log.",
 	"row.offPeakOn": "off-peak",
 	"row.offPeakOff": "standard",
+	"row.offPeakEnd": "until {time}",
+	"row.offPeakStart": "from {time}",
 	"row.offPeakUntil": "switches in {time}",
 	"row.offPeakHint": "The off-peak discount applies {window} ({zone}); the rate shown follows the current window and changes on its own at the boundary.",
 	// Search, error retry, and the Escape-to-collapse affordance.
@@ -106,6 +157,9 @@ export const enRow = {
 	"row.searchPlaceholder": "Type a model name…",
 	"row.searchEmpty": "No matching models.",
 	"row.retry": "Retry",
-	"row.filterCount": "{visible} of {total} shown · {ticked} ticked",
-	"row.clearFilter": "Clear filter"
+	"row.filterCount": "{visible} of {total} shown",
+	"row.filterTicked": "{ticked} ticked",
+	"row.clearFilter": "Clear filter",
+	"row.imageTuning": "Tune image input per model",
+	"row.imageTuningTitle": "Off by default: every model follows the vision flag Qoder's own catalog declares. Turn it on to force image input on or off per model; a model you have already changed stays visible either way."
 };

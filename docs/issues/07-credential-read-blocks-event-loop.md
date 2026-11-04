@@ -11,8 +11,8 @@ Qoder 目录存在但 `Local State` 解不开时（正是账号面板要解释�
 
 ## 证据
 
-- `lib/credentials.js:272-281`（`execFileSync` + 30 s 超时）、`326-341`（失败刻意不缓存）
-- `lib/account-state.js:89`（直调 `loadCredential`）
+- `src/host/credentials.ts`（`execFileSync` + 30 s 超时）、`326-341`（失败刻意不缓存）
+- `src/host/account-state.ts`（直调 `loadCredential`）
 - `lib/index.js:1028`（`/account` 每次请求都读状态）
 
 ## 修法
@@ -28,7 +28,7 @@ Qoder 目录存在但 `Local State` 解不开时（正是账号面板要解释�
 - [x] 新用例：解包失败后 60 s 内不重试，超过 TTL 才重试
 - [x] 手工验证：解不开的机器上卡片在 200 ms 内渲染出 `needs-app`（由 `cachedOnly` 达成，见下）
 
-## 实现（第 1、3 条已修；第 4 条异步化未做，第 2 条按缓存读等价实现）
+## 实现（四条全部落地：第 1、3 条随本 issue，第 4 条异步化随后续一轮做掉，第 2 条按缓存读等价实现）
 
 ### 做了什么
 

@@ -1,0 +1,32 @@
+{
+  "_meta": {
+    "region": "qoder-cn",
+    "kind": "usage",
+    "capturedAt": "2026-10-18T00:00:00.000Z",
+    "pluginShapeReader": "accepted",
+    "sanitized": true,
+    "note": "Seeded fixture. `usagePresentationUrl` wraps the body under `qoderUsage`; `readUsageShape` also accepts `data` or the bare body, and this wrapper is the one that route answers with. Quota values are illustrative, not a live capture. Regenerate with `node probe/capture-fixtures.mjs` on a machine with a Qoder sign-in."
+  },
+  "body": {
+    "qoderUsage": {
+      "user_quota": {
+        "total": 100,
+        "used": 25,
+        "remaining": 75,
+        "percentage": 0.25
+      },
+      "add_on_quota": {
+        "total": 50,
+        "used": 0,
+        "remaining": 50,
+        "percentage": 0.0
+      },
+      "dedicated_resource_packages": [],
+      "is_quota_exceeded": false,
+      "user_type": "free",
+      "expires_at": "2027-01-01T00:00:00.000Z",
+      "upgrade_url": "https://openapi.qoder.com.cn/upgrade"
+    },
+    "display_mode": "normal"
+  }
+}

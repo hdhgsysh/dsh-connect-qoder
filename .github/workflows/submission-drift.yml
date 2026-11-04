@@ -1,0 +1,67 @@
+name: Submission drift
+
+# Is the marketplace entry still saying what this repository says it says?
+#
+# `test/submission-drift.mjs` fetches `data/plugins/<owner>__<repo>.yml` from
+# upstream and compares it, field by field, with `awesome-dsh-plugin-submission/`
+# here. That comparison cannot be made offline, so it cannot live in ci.yml.
+#
+# Why a clock and not a push:
+#
+#   The entry is edited on someone else's schedule. A per-push run measures our
+#   commit cadence, not the maintainers' edit cadence — and the week the
+#   `category` disagreement went unseen was exactly that shape: the entry was
+#   re-filed upstream, nothing on our side was touched, so nothing on our side
+#   ran. Drift is a time-dependent property.
+#
+# Why its own workflow rather than a job inside ci.yml:
+#
+#   A red here is INFORMATION, never a regression: the fix belongs in
+#   `awesome-dsh-plugin-submission/`, or in a PR against upstream. Sharing a
+#   page with the offline hard gate makes the one signal that says BLOCK sit
+#   next to the one that says READ THIS, and the second one loses.
+#
+#   No `continue-on-error` either. On a scheduled workflow GitHub mails the
+#   owner when a run fails, which is the "shows up the day it happens" property
+#   a swallowed job promises and cannot deliver. A red here means: read the
+#   report, adopt the upstream text or re-open the PR.
+#
+# The one thing this must never do is go quietly green having compared nothing.
+# A network failure SKIPs (exit 0) but prints the URL it could not reach and
+# annotates the run, because "I could not ask" is not "the entry is fine" — and
+# `pending-drift.json` is checked from both sides so an excuse that has outlived
+# its reason reds the build instead of muting it forever.
+#
+# Dispatchable so a red can be re-run by hand after the draft is fixed.
+
+on:
+  schedule:
+    # 03:41 UTC = 11:41 CST: after the upstream maintainers' day has produced
+    # whatever edits it was going to, early enough for this one to be read.
+    # Staggered by two minutes from the sibling repositories so five mails do
+    # not arrive at once and get skimmed as one.
+    - cron: '45 3 * * *'
+  workflow_dispatch:
+  # Editing the draft is the one moment a red is OUR regression, so it also runs
+  # on those pushes. Nothing else triggers it: this is not a gate on your work.
+  push:
+    paths:
+      - 'awesome-dsh-plugin-submission/**'
+      - 'test/submission-drift.mjs'
+      - '.github/workflows/submission-drift.yml'
+
+jobs:
+  submission-drift:
+    name: Draft vs live marketplace entry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # No dependencies to install (peerDependencies only, as in ci.yml), and no
+      # secret: the upstream repository is public and raw.githubusercontent.com
+      # needs no auth. This is deliberately NOT a `*.test.mjs` line, so it stays
+      # out of the three-way roster pin in test/package.test.mjs.
+      - name: Compare the draft with the live entry
+        run: node test/submission-drift.mjs

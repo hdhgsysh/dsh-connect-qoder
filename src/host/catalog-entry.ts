@@ -20,7 +20,8 @@
 import { regionEnabledFor, HIDE_ALL_MODELS } from './preferences.ts'
 import { contextWindowLabelFor, resolveContextWindow } from './pi-model.ts'
 import { unwrapVolatile } from './volatile.ts'
-import type { CatalogEntry, Promotion, Region } from './domain.ts'
+import { providerRegistrationState } from './errors.ts'
+import type { CatalogEntry, Promotion, RefreshFailureReason, Region } from './domain.ts'
 import type { Preferences } from './preferences.ts'
 
 /**
@@ -60,7 +61,15 @@ export interface RuntimeRef {
   runtime: {
     region: Region
     catalog: { current(): CatalogEntry[]; fetchedAt?: number }
-    refreshFailed?: { reason: string; error?: unknown } | undefined
+    refreshFailed?: { reason: RefreshFailureReason; error?: unknown } | undefined
+    /**
+     * The ids this region's roster history still calls "first seen recently".
+     *
+     * Optional: the route's stand-ins (and a host that predates the field) have
+     * no history to read, and a roster with no marker is exactly what a
+     * first-ever run renders — so the absence is a supported state, not a hole.
+     */
+    newModelIds?: () => string[]
   }
 }
 
@@ -86,6 +95,27 @@ function modelIdFor(entry: { display_name?: unknown }): string {
   // model, which is worse than renaming its id in a way the user never sees
   // (the picker shows the display name, not the id).
   return id === HIDE_ALL_MODELS ? `${id}_model` : id
+}
+
+/**
+ * The credit multiplier as declared, or `undefined` when it was not declared.
+ *
+ * The point of this function is the case it does NOT collapse. A missing,
+ * non-numeric or non-finite factor is a *gap*, and every consumer downstream
+ * already has a branch for "no rate" (`effectiveRate` answers `NaN`,
+ * `toPiModel` and `rateLabelOf` answer the bare name and `undefined`). Folding
+ * that gap into `0` — which is what `Number(x) || 0` did — makes all three
+ * branches unreachable and renders the model as 免费, a confident wrong fact
+ * rather than a visible absence.
+ *
+ * `0` and negative factors are kept as-is on purpose: a model the upstream
+ * really prices at zero is genuinely free, and that is not the same statement
+ * as "the upstream did not say".
+ */
+function priceFactorOf(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined
+  const factor = Number(value)
+  return Number.isFinite(factor) ? factor : undefined
 }
 
 /**
@@ -117,10 +147,13 @@ export function normalizeEntry(entry: FetchedEntry): CatalogEntry {
     // are carried through verbatim so the setting and the picker agree.
     defaultContextWindow: entry.defaultContextWindow ?? 0,
     contextOptions: Array.isArray(entry.contextOptions) ? entry.contextOptions : [],
-    // The credit multiplier Qoder charges for this model. It is display-only,
-    // but the picker shows it beside the name so the cost of a choice is visible
-    // before the request is sent. `toPiModel` is what formats it.
-    priceFactor: Number(entry.priceFactor) || 0,
+    // The credit multiplier Qoder charges, display-only: the picker shows it
+    // beside the name so the cost of a choice is visible before the request.
+    // An ABSENT factor stays absent, never `0` — `0` is finite, so it renders
+    // as 免费 and makes the honest "no rate" branches unreachable.
+    // A genuinely free model (factor 0 or negative) still reads 免费: declared,
+    // not missing. See docs/issues/16-silent-failure-policy.md.
+    priceFactor: priceFactorOf(entry.priceFactor),
     // Free models skip the credit multiplier entirely; the picker reads
     // `isFree` to display 免费 instead of `x0.00`.
     isFree: entry.isFree === true,
@@ -176,33 +209,28 @@ export function filterByEnabled(
 }
 
 /**
- * Build the response body the settings card's model route serves.
+ * Build the response body the settings card's model route serves — a pure
+ * function of the started runtimes, the resolved settings and the clock.
  *
- * Extracted from the route handler in lib/index.js so it can be tested. The
- * route is I/O — a method check, an origin check, an optional upstream refresh —
- * but what it *answers* is a pure function of the started runtimes, the resolved
- * settings and the clock, and that is where the decisions are.
+ * Settings are unwrapped one field at a time: the source unwraps the source,
+ * not the fields inside it, so a volatile field is still a `{ get() }` shell and
+ * a plain `?? {}` guard would ship that shell as an object with no settings.
+ * `refreshedAt` is the oldest fetch among the served regions, never "now", and
+ * `refreshFailures` names the stale ones, so the card stops implying a refresh
+ * it did not get. `providerRegistration` reports activation: since
+ * docs/issues/20-llm-handoff-detached.md a failed registration no longer
+ * unwinds `activate()`, so the route answers with the provider half dead; only
+ * the error's name ships (see {@link providerRegistrationState}).
  *
- * The three settings are unwrapped individually. Resolving the settings source
- * unwraps the source, not the fields inside it, so on the 0.1.7 line a volatile
- * field is still a `{ get() }` shell here — and `typeof shell === 'object'` is
- * true, so a plain `?? {}` guard passes the shell straight through to the card
- * as an object containing no settings at all.
- *
- * Two of the fields it returns describe the catalog's own age rather than the
- * request: `refreshedAt` is when the served rows were last fetched upstream
- * (see {@link oldestFetchedAtOf}), and `refreshFailures` names the regions whose
- * catalog is stale and why (see {@link refreshFailuresOf}). They are what let
- * the card stop implying a refresh it did not get.
- *
- * @param options.runtimes - `[{ runtime }]`, the started regions. Each runtime
- *   carries `catalog.fetchedAt` and `refreshFailed`; both are optional, because
- *   a stand-in without them must still produce a body.
+ * @param options.runtimes - `[{ runtime }]`; each runtime carries optional
+ *   `catalog.fetchedAt` and `refreshFailed`.
  * @param options.settings - the resolved settings.
  * @param options.now - the instant rates are resolved against.
- * @param options.projectRow - the row projector, injected so this module stays
+ * @param options.projectRow - the row projector, injected to keep this module
  *   free of the adapter import.
  * @param options.rates - the rate helpers `projectRow` uses.
+ * @param options.providerRegistrationError - the error `activate()` recorded,
+ *   or `undefined` when it landed; `undefined` IS the success sentinel.
  * @returns the JSON body.
  */
 export function buildModelRowsPayload({
@@ -211,12 +239,14 @@ export function buildModelRowsPayload({
   now,
   projectRow,
   rates,
+  providerRegistrationError,
 }: {
   runtimes: RuntimeRef[]
   settings: Preferences | undefined
   now: Date
   projectRow: (entry: CatalogEntry, region: Region, now: Date, rates: RateHelpers, preferMax: boolean) => unknown
   rates: RateHelpers
+  providerRegistrationError?: unknown
 }): Record<string, unknown> {
   const models: unknown[] = []
   const preferMax = unwrapVolatile(settings?.useMaximumContextWindow) === true
@@ -234,6 +264,15 @@ export function buildModelRowsPayload({
   const enabled = unwrapVolatile(settings?.enabledModelIds)
   return {
     models,
+    // Which ids the roster history still calls "first seen recently", gathered
+    // from the SAME regions that contributed rows (a switched-off region is
+    // skipped by the loop above, so it must not announce anything here either —
+    // otherwise the pill would mark a model the picker is not offering).
+    //
+    // The pill intersects these with the rows it already has, so the payload
+    // carries ids and nothing else: shipping names too would be a second copy of
+    // the roster's own field, and the two could disagree.
+    newModelIds: newModelIdsOf(runtimes, settings),
     imageOverrides: overrides !== null && typeof overrides === 'object' ? overrides : {},
     useMaximumContextWindow: unwrapVolatile(settings?.useMaximumContextWindow) === true,
     enabledModelIds: enabled !== null && typeof enabled === 'object' ? enabled : {},
@@ -248,7 +287,53 @@ export function buildModelRowsPayload({
     // instead of guessing from a timestamp.
     refreshedAt: oldestFetchedAtOf(runtimes),
     refreshFailures: refreshFailuresOf(runtimes),
+    // Activation health, folded into the roster the card already fetches. See
+    // the doc comment above: a card route that answers while the provider half
+    // is dead is exactly the state docs/issues/20 left unexplained.
+    providerRegistration: providerRegistrationState(providerRegistrationError),
   }
+}
+
+/**
+ * Which model ids the roster history calls new, over the regions being served.
+ *
+ * Two filters, both deliberate:
+ *  - a switched-off region contributes nothing, matching the row loop — a marker
+ *    for a model the picker is not offering would point at a row the card does
+ *    not show;
+ *  - an id that is NOT in the region's current catalog is dropped. The history
+ *    file can lag the roster (a model retired while this process slept), and
+ *    announcing a model nobody can select is a marker that leads nowhere.
+ *
+ * An absent `newModelIds()` — a stand-in runtime, or a host older than this
+ * field — answers an empty array rather than throwing: the payload builder is
+ * pure and must not fail over a suggestion.
+ *
+ * @param runtimes - `[{ runtime }]`, as passed to the payload builder.
+ * @param settings - the resolved settings, for the per-region switch.
+ * @returns the ids, in the history's own order (oldest first).
+ */
+function newModelIdsOf(runtimes: RuntimeRef[], settings: Preferences | undefined): string[] {
+  const ids: string[] = []
+  for (const { runtime } of runtimes) {
+    if (regionEnabledFor(settings, runtime.region.id) !== true) continue
+    const read = runtime?.newModelIds
+    if (typeof read !== 'function') continue
+    let fresh: unknown
+    try {
+      fresh = read.call(runtime)
+    } catch {
+      // A history read that throws is the same absence as one that has nothing
+      // to say: the marker is skipped, the roster is still served.
+      continue
+    }
+    if (!Array.isArray(fresh)) continue
+    const offered = new Set(runtime.catalog.current().map((entry) => entry.id))
+    for (const id of fresh) {
+      if (typeof id === 'string' && id !== '' && offered.has(id)) ids.push(id)
+    }
+  }
+  return ids
 }
 
 /**
@@ -289,8 +374,8 @@ function oldestFetchedAtOf(runtimes: RuntimeRef[]): number | undefined {
  */
 function refreshFailuresOf(
   runtimes: RuntimeRef[],
-): Array<{ region?: string; regionName?: string; reason: string; detail?: string }> {
-  const failures: Array<{ region?: string; regionName?: string; reason: string; detail?: string }> = []
+): Array<{ region?: string; regionName?: string; reason: string; detail?: string | undefined }> {
+  const failures: Array<{ region?: string; regionName?: string; reason: string; detail?: string | undefined }> = []
   for (const { runtime } of runtimes) {
     const failure = runtime?.refreshFailed
     if (failure === undefined || failure === null) continue
@@ -343,10 +428,18 @@ export function projectModelRow(
     region: region.id,
     regionName: region.displayName,
     isVL: entry.isVL === true,
-    // The raw catalog multiplier, kept for reference.
-    priceFactor: Number(entry.priceFactor) || 0,
-    // Free models display 免费 instead of x0.00 in the picker; `toPiModel` also
-    // uses this flag directly.
+    // The raw catalog multiplier, kept for reference — and the field the card
+    // resolves its displayed rate from, on its own ticking clock. Absence is
+    // preserved (see `priceFactorOf`) so the card can tell "declared free" from
+    // "the upstream did not say": `rateAt` answers `undefined` for a non-finite
+    // factor and the row shows no rate, where a manufactured `0` would be
+    // labelled 免费.
+    priceFactor: priceFactorOf(entry.priceFactor),
+    // Free models display 免费 instead of x0.00 in the picker. NOTE: nothing
+    // reads this flag today — `displayNameFor` decides 免费 from the resolved
+    // `factor <= 0`, so a real zero-priced model is still labelled correctly.
+    // It is carried for the payload's sake, and it is the honest signal should
+    // "免费" ever need to mean "flagged free" rather than "priced at zero".
     isFree: entry.isFree === true,
     // Whether the Qoder app starts on this model by default.
     isDefault: entry.isDefault === true,

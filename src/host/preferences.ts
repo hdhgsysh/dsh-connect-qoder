@@ -7,7 +7,7 @@
  *
  * Two of the three settings are read on every model build and on every listing,
  * so their resolution sits on the hot path of a card render. The interesting
- * part is the 0.1.7 live-reference shape: a volatile field holds `{ get() }`
+ * part is the live-reference shape: a volatile field holds `{ get() }`
  * rather than a value, and reading it directly yields the shell.
  *
  * @module dsh-connect-qoder/preferences
@@ -25,7 +25,7 @@ import type { VolatileRef } from './volatile.ts'
  * means "no filter" and an absent region switch means "offered", which is the
  * opposite of a default-filled document.
  *
- * The `VolatileRef<>` wrappers are not decoration: on the 0.1.7 line each of
+ * The `VolatileRef<>` wrappers are not decoration: on the 0.2 line each of
  * these arrives as a `{ get() }` shell, and every reader here unwraps before
  * use. Declaring the shell in the type means a new reader cannot forget.
  */
@@ -49,21 +49,20 @@ export type ImageMode = 'auto' | 'on' | 'off'
  * Resolve the current settings, preferring a live source over a frozen snapshot.
  *
  * The source may be a plain object, a `{ get() }` reference to the settings
- * document, or a zero-argument function returning either — the three shapes the
- * 0.1.6 installSection and 0.1.7 configure lines hand over. A source that
- * resolves to nothing usable falls back to the snapshot rather than blanking
- * the card.
+ * document, or a zero-argument function returning either — the shapes a live
+ * settings source hands over. A source that resolves to nothing usable falls
+ * back to the snapshot rather than blanking the card.
  *
  * @param snapshot - the last known-good values.
  * @param source - the live source, or `undefined`.
  * @returns the merged settings.
  */
 /**
- * Where the settings are read from, in any of the spellings a Host line hands
- * over: a plain document, a `{ get() }` reference to one, or a zero-argument
- * function returning either. Named so the entry can declare its mutable
- * `preferencesSource` with the same union this module accepts, instead of the
- * two sides drifting to different spellings of "the live source".
+ * Where the settings are read from, in any of the spellings a live settings
+ * source hands over: a plain document, a `{ get() }` reference to one, or a
+ * zero-argument function returning either. Named so the entry can declare
+ * its source with the same union this module accepts, instead of the two
+ * sides drifting to different spellings of "the live source".
  */
 export type PreferencesSource = Preferences | VolatileRef<Preferences> | (() => unknown) | undefined
 
@@ -86,23 +85,11 @@ export function resolvePreferences(
   return { ...snapshot, ...(resolved as Partial<Preferences>) }
 }
 
-/**
- * The sentinel a region's allow-list carries to mean "hide every model".
- *
- * The host convention is `[] = no filter = show all` (a fresh install must
- * still see every model), so "hide all" has no value of its own in that scheme.
- * A non-empty list that matches no real model id collapses to "show nothing" in
- * `filterByEnabled` (the allow-list branch keeps the ids, matches none, returns
- * `[]`), so a marker that no model id can ever equal expresses "hide all"
- * without touching that convention.
- *
- * It WAS considered to move this to an explicit `null` (docs/issues/12, item
- * 10), and staying with the sentinel is a trade rather than an oversight:
- * `null` reads better in a hand-edited settings file, but every existing user
- * has `["__hide-all__"]` in their document, and a format change would silently
- * turn their "hide all" into "show all". So the marker stays and the invariant
- * that makes it safe — no model id can ever equal it — is enforced where ids are
- * minted (`modelIdFor` in lib/catalog-entry.js) rather than assumed.
+/** The sentinel a region's allow-list carries to mean "hide every model".
+ * The host convention is `[] = no filter = show all`, so "hide all" has no
+ * value of its own; a marker no model id can ever equal expresses it without
+ * touching that convention. It stays a sentinel, not `null`: existing settings
+ * hold `["__hide-all__"]` (docs/issues/12-small-fixes-batch.md).
  */
 export const HIDE_ALL_MODELS = '__hide-all__'
 

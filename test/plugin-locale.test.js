@@ -38,7 +38,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
@@ -201,4 +201,77 @@ test('the locale files ship in the published package', () => {
     pkg.files.includes('locale/*.json'),
     'package.json#files does not ship locale/*.json — the metadata would revert after publish',
   )
+})
+
+/**
+ * The same listing copy lives in FOUR places, and nothing used to compare them.
+ *
+ *   locale/en.json                          the anchor the host resolves
+ *   locale/zh.json                          the Chinese card
+ *   package.json#description                the English fallback (a DIFFERENT
+ *                                           string from en.json is the silent-
+ *                                           English drift this file exists for)
+ *   awesome-dsh-plugin-submission/*.yml     the draft copied into the marketplace
+ *
+ * In the sibling agnes repo the draft and the live marketplace entry had
+ * disagreed about `category` for a week with no red build anywhere, while the
+ * copy itself had already been edited twice through those two surfaces
+ * separately. This is the OFFLINE half of that fence.
+ *
+ * What it cannot see is what the upstream entry actually says: an internally
+ * consistent draft that is stale against upstream passes here, on purpose —
+ * that is `test/submission-drift.mjs`, which needs the network and lives in the
+ * scheduled tier. A red build caused by someone else's `main` is nobody's
+ * regression, and that is how a gate stops being read.
+ *
+ * `category` is deliberately not asserted here: the valid set lives in the
+ * upstream `contributing.md` and moves as the taxonomy splits, so a copy of it
+ * in this repo would be the hardcoded-value drift class the docs gates forbid.
+ */
+test('the submission draft says the same thing as the card', () => {
+  const en = JSON.parse(readFileSync(join(root, 'locale', 'en.json'), 'utf8')).meta.description
+  const zh = JSON.parse(readFileSync(join(root, 'locale', 'zh.json'), 'utf8')).meta.description
+
+  assert.equal(
+    pkg.description, en,
+    'package.json#description drifted from locale/en.json — that is the silent-English fallback',
+  )
+
+  const repoUrl = String(pkg.repository?.url ?? '').replace(/^git\+/, '').replace(/\.git$/, '')
+  const slug = repoUrl.replace(/^https:\/\/github\.com\//, '')
+  const draftPath = join(root, 'awesome-dsh-plugin-submission', `${slug.replace('/', '__')}.yml`)
+
+  // A repo without a draft has nothing to pin here; the directory exists to
+  // hold the text that was submitted, not to be mandatory.
+  if (!existsSync(draftPath)) return
+
+  const draft = readFileSync(draftPath, 'utf8')
+  // Scanned line by line rather than by regex on purpose: inside a template
+  // literal `\s` is silently eaten as an escape, so the pattern that reaches
+  // the engine is `^url:s*(S+)s*$` — a "gate" that can only ever pass. The
+  // draft has a dozen fields; finding them is cheaper than escaping them.
+  //
+  // A single-quoted scalar escapes a quote by doubling it: the file holds
+  // `model''s` for `model's`, so unescape before comparing — otherwise every
+  // apostrophe in the copy reads as drift.
+  const lines = draft.split('\n').map((line) => line.trim())
+  const scalar = (key) => {
+    const prefix = `${key}: '`
+    const line = lines.find((candidate) => candidate.startsWith(prefix) && candidate.endsWith("'"))
+    return line === undefined ? undefined : line.slice(prefix.length, -1).replaceAll("''", "'")
+  }
+  const field = (key) => {
+    const prefix = `${key}: `
+    const line = lines.find((candidate) => candidate.startsWith(prefix))
+    return line === undefined ? undefined : line.slice(prefix.length).trim()
+  }
+
+  assert.ok(
+    scalar('en') !== undefined && scalar('zh') !== undefined,
+    'the draft is missing one of description.en / description.zh, or they are not single-quoted scalars',
+  )
+  assert.equal(field('url'), repoUrl, 'the draft points at a different repository')
+  assert.equal(field('name'), slug, 'the draft is named after a different repository')
+  assert.equal(scalar('en'), en, 'edit one, edit both — the marketplace and the card are the same sentence')
+  assert.equal(scalar('zh'), zh, 'edit one, edit both — the marketplace and the card are the same sentence')
 })

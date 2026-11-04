@@ -14,14 +14,45 @@
  * The runs are driven by hand-settled deferreds rather than timers, so the
  * interleaving under test is exact rather than "probably within the sleep".
  */
+// @ts-check
+
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createSingleFlight } from '../src/host/single-flight.ts'
 
+/**
+ * One recorded run: the arguments it was called with, plus the two handles the
+ * test uses to settle it.
+ *
+ * @typedef {object} Run
+ * @property {unknown[]} args
+ * @property {(value: unknown) => void} resolve
+ * @property {(reason: unknown) => void} reject
+ */
+
+/**
+ * The n-th recorded run.
+ *
+ * The index is asserted, not assumed: `runAt(runs, 0).resolve(…)` on a missing run
+ * would throw a TypeError, and the test would fail with a message about
+ * `undefined` instead of about the run that never started.
+ *
+ * @param {Run[]} runs
+ * @param {number} index
+ * @returns {Run}
+ */
+function runAt(runs, index) {
+  const run = runs[index]
+  assert.ok(run !== undefined, `run ${index} must exist`)
+  return run
+}
+
 /** A task whose completion the test controls. */
 function deferredTask() {
+  /** @type {Run[]} */
   const runs = []
+  /** @type {(...args: unknown[]) => Promise<unknown>} */
   const run = (...args) =>
     new Promise((resolve, reject) => {
       runs.push({ args, resolve, reject })
@@ -36,9 +67,9 @@ test('concurrent calls share one run and all receive its result', async () => {
   const third = task('c')
 
   assert.equal(runs.length, 1, 'joining callers must not start a second run')
-  assert.deepEqual(runs[0].args, ['a'], 'the run carries the STARTING caller arguments')
+  assert.deepEqual(runAt(runs, 0).args, ['a'], 'the run carries the STARTING caller arguments')
 
-  runs[0].resolve('result-1')
+  runAt(runs, 0).resolve('result-1')
   // Same promise, not a similar value: the route handler and the timer await
   // one fetch, so upstream sees one request per completed refresh.
   assert.equal(await first, 'result-1')
@@ -49,13 +80,13 @@ test('concurrent calls share one run and all receive its result', async () => {
 test('a settled flight does not memoize — the next call starts a fresh run', async () => {
   const { runs, task } = deferredTask()
   const p1 = task(1)
-  runs[0].resolve('one')
+  runAt(runs, 0).resolve('one')
   assert.equal(await p1, 'one')
 
   const p2 = task(2)
   assert.equal(runs.length, 2, 'the slot must be free once the run settles')
-  assert.deepEqual(runs[1].args, [2], 'the fresh run must see the fresh arguments, not the first call')
-  runs[1].resolve('two')
+  assert.deepEqual(runAt(runs, 1).args, [2], 'the fresh run must see the fresh arguments, not the first call')
+  runAt(runs, 1).resolve('two')
   assert.equal(await p2, 'two')
 })
 
@@ -66,7 +97,7 @@ test('a rejected run rejects every joiner and never blocks future runs', async (
   const p2 = task()
   const p3 = task()
   assert.equal(runs.length, 1)
-  runs[0].reject(failure)
+  runAt(runs, 0).reject(failure)
 
   // Every joined caller must observe the same failure — a refresh that dies
   // quietly for the joiners is exactly the silent-swallow class again.
@@ -76,7 +107,7 @@ test('a rejected run rejects every joiner and never blocks future runs', async (
 
   const p4 = task()
   assert.equal(runs.length, 2, 'a failed run must free the slot for the next attempt')
-  runs[1].resolve('recovered')
+  runAt(runs, 1).resolve('recovered')
   assert.equal(await p4, 'recovered')
 })
 
@@ -111,4 +142,63 @@ test('coalescing does not swallow the second caller into a stale first run when 
   assert.equal(await task(), 1)
   assert.equal(await task(), 2)
   assert.equal(await task(), 3)
+})
+
+test('reset lets the next call start a fresh run while the old one is still live', async () => {
+  // The invalidation shape `RegionRuntime.invalidateUsage` needs: a reading is
+  // in flight, an event (a claim) makes it worthless, and the caller that KNOWS
+  // that must be able to ask for a new one instead of being joined onto the
+  // worthless run.
+  const { runs, task } = deferredTask()
+  const doomed = task('before-claim')
+  assert.equal(runs.length, 1)
+
+  task.reset()
+  const fresh = task('after-claim')
+
+  assert.equal(runs.length, 2, 'reset must release the slot so a fresh run can start')
+  assert.deepEqual(runAt(runs, 1).args, ['after-claim'], 'the fresh run must see the fresh arguments')
+
+  runAt(runs, 0).resolve('stale-balance')
+  runAt(runs, 1).resolve('claimed-balance')
+
+  // The abandoned run still answers the caller that was already waiting on it —
+  // `reset` releases the SLOT, it does not cancel the work or strand an awaiter.
+  assert.equal(await doomed, 'stale-balance')
+  assert.equal(await fresh, 'claimed-balance')
+})
+
+test('a run abandoned by reset does not evict the run that replaced it', async () => {
+  // The subtle half of `reset`. The abandoned run settles LATER, and its cleanup
+  // runs then; clearing the slot unconditionally at that moment would evict the
+  // newer run and reopen the coalescing window — the next caller would start a
+  // third run while the second is still live.
+  const { runs, task } = deferredTask()
+  const abandoned = task('old')
+  task.reset()
+  const replacement = task('new')
+  assert.equal(runs.length, 2)
+
+  // The abandoned one settles FIRST, which is the dangerous ordering: if its
+  // cleanup freed the slot, the call below would start run #3.
+  runAt(runs, 0).resolve('old-value')
+  assert.equal(await abandoned, 'old-value')
+
+  const joined = task('joiner')
+  assert.equal(runs.length, 2, 'the replacement must still hold the slot')
+  assert.deepEqual(runAt(runs, 1).args, ['new'], 'the joiner must join the replacement run')
+
+  runAt(runs, 1).resolve('new-value')
+  assert.equal(await replacement, 'new-value')
+  assert.equal(await joined, 'new-value')
+})
+
+test('reset with nothing in flight is a no-op', async () => {
+  const { runs, task } = deferredTask()
+  task.reset()
+  const p = task('only')
+  assert.equal(runs.length, 1)
+  assert.deepEqual(runAt(runs, 0).args, ['only'])
+  runAt(runs, 0).resolve('done')
+  assert.equal(await p, 'done')
 })

@@ -164,18 +164,36 @@ const bundle = [
  * the card is silent, and it would overwrite a working artifact with a shell.
  *
  * Each needle below is one thing that must survive: the gate whose loss is
- * invisible, the card itself, the routes it reads, and the two bindings the
- * host does not provide (see SHIM and the jsx-runtime external).
+ * invisible, the card itself, every panel and route the card reads or writes,
+ * and the two bindings the host does not provide (see SHIM and the jsx-runtime
+ * external).
+ *
+ * The route list is COMPLETE on purpose: a half-pinned route table still lets
+ * a bundle lose the check-in button, the usage panel, or the device sign-in
+ * while every other pin stays green — which is the same silence this gate
+ * exists to end (docs/issues/03).
  */
 const REQUIRED = [
   ['function offPeakState(', 'the off-peak rule the card prices models with'],
   ['promo.active !== true', 'the gate that hides a discount Qoder has switched off'],
   ['function QoderPluginCard(', 'the card component'],
   ['function QoderAccountPanel(', 'the account panel component'],
+  ['function QoderUsagePanel(', 'the usage panel component'],
+  ['function QoderDeviceLoginPanel(', 'the device sign-in panel component'],
+  ['function TokenHistoryChart(', 'the token history chart component'],
+  ['function ComposerUsagePill(', 'the composer usage pill component'],
   ['function installStyles(', 'the stylesheet injection'],
   ['function writeSettingsField(', 'the write-then-read-back settings path'],
   ['/plugins/dsh-connect-qoder/models', 'the model route the card renders rows from'],
+  ['/plugins/dsh-connect-qoder/usage', 'the usage route the panels read quotas from'],
+  ['/plugins/dsh-connect-qoder/account', 'the account route the panel reads sign-ins from'],
+  ['/plugins/dsh-connect-qoder/account/reload', 'the sign-in reload route'],
   ['/plugins/dsh-connect-qoder/account/confirm', 'the sign-in confirmation route'],
+  ['/plugins/dsh-connect-qoder/checkin', 'the daily check-in route'],
+  ['/plugins/dsh-connect-qoder/device-login/start', 'the device sign-in start route'],
+  ['/plugins/dsh-connect-qoder/device-login/poll', 'the device sign-in poll route'],
+  ['/plugins/dsh-connect-qoder/device-login/cancel', 'the device sign-in cancel route'],
+  ['/plugins/dsh-connect-qoder/device-login/signout', 'the device sign-out route'],
   ['require("react/jsx-runtime")', 'the JSX runtime, which the host supplies'],
   ['var module = { exports: {} }', 'the CommonJS bindings the loader does not provide'],
 ]

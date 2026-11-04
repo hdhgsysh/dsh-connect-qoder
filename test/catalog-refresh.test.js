@@ -37,6 +37,7 @@ function makeCatalog(initial = [], now = 1_000) {
     entries: initial,
     fetchedAt: 500,
     replacements: [],
+    lastSaveError: undefined,
     replace(entries, at = now) {
       this.entries = entries
       this.fetchedAt = at
@@ -148,6 +149,35 @@ test('a successful refresh clears an earlier failure', () => {
   assert.strictEqual(runtime.refreshFailed, undefined, 'a good answer must clear the failure marker')
 })
 
+test('a swallowed disk write is surfaced as a persist failure, not cleared', () => {
+  // `CatalogStore.save()` records `lastSaveError` and returns instead of
+  // throwing — that swallow is load-bearing. But the in-memory roster has
+  // already advanced, and if the fold cleared the failure marker the card
+  // would stamp "已更新" on a catalog the disk does not have. The write error
+  // must become a failure class of its own, not a cleared one.
+  const runtime = makeRuntime({ entries: [] })
+  const writeError = new Error('EACCES: permission denied, open catalog.json')
+  runtime.catalog.lastSaveError = writeError
+  const result = applyCatalogOutcome(runtime, { ok: true, entries: [ENTRY] })
+
+  assert.strictEqual(result.committed, true, 'the answer still replaced the in-memory roster')
+  assert.deepStrictEqual(runtime.catalog.entries, [ENTRY])
+  assert.strictEqual(runtime.refreshFailed?.reason, 'persist')
+  assert.strictEqual(runtime.refreshFailed?.error, writeError, 'the recorded write error is the one reported')
+  assert.ok(REFRESH_FAILURE_REASONS.includes('persist'), 'persist must be a known reason, not an invented one')
+})
+
+test('a refresh whose write landed does not report a phantom persist failure', () => {
+  // The success path must clear the marker when the save actually landed —
+  // `save()` resets `lastSaveError` at the start of every write, so a
+  // successful `replace()` leaves it `undefined` and the fold clears.
+  const runtime = makeRuntime({ entries: [] })
+  applyCatalogOutcome(runtime, { ok: false, reason: 'fetch', error: new Error('boom') })
+  applyCatalogOutcome(runtime, { ok: true, entries: [ENTRY] })
+  assert.strictEqual(runtime.refreshFailed, undefined)
+  assert.strictEqual(runtime.catalog.lastSaveError, undefined)
+})
+
 test('a runtime with no invalidate hook does not throw', () => {
   // `invalidate` is optional (`this.invalidate?.()` in the original) because a
   // runtime can exist before the activation tail wires it. An optional call
@@ -159,16 +189,35 @@ test('a runtime with no invalidate hook does not throw', () => {
 
 test('the failure reason is always a known one', () => {
   // The card maps reasons to copy. A reason invented by a future edit would
-  // render as an empty string, so an unrecognised one falls back to the generic
-  // bucket rather than travelling onward.
+  // render as the generic bucket, so an unrecognised one falls back to it here
+  // rather than travelling onward.
+  //
+  // This assertion used to read `assert.strictEqual(..., 'something-new')` —
+  // i.e. it pinned that a junk reason was carried through UNCHANGED — while the
+  // comment directly above it claimed the opposite. Both the comment and the
+  // client agreed with each other and not with the code: `refreshNoticeKey`
+  // (`card-model.ts`) recognises exactly two reasons and answers `"transient"`
+  // for everything else, so an unknown reason had no copy of its own and no way
+  // to get one. The old assertion was pinning the implementation rather than
+  // the contract, which is why the gap it described stayed open.
+  // `REFRESH_FAILURE_REASONS` is now the single source of truth and the type is
+  // derived from it, so a genuinely new reason fails to compile instead.
   const runtime = makeRuntime()
   applyCatalogOutcome(runtime, { ok: false, reason: 'something-new', error: undefined })
-  assert.strictEqual(runtime.refreshFailed.reason, 'something-new')
+  assert.strictEqual(runtime.refreshFailed.reason, 'fetch', 'an unknown reason falls back to the generic bucket')
 
   const missing = makeRuntime()
   applyCatalogOutcome(missing, { ok: false })
   assert.strictEqual(missing.refreshFailed.reason, 'fetch')
   assert.ok(REFRESH_FAILURE_REASONS.includes(missing.refreshFailed.reason))
+
+  // Every known reason must survive verbatim, so the fallback above cannot be
+  // "pass everything to fetch" in disguise.
+  for (const reason of REFRESH_FAILURE_REASONS) {
+    const known = makeRuntime()
+    applyCatalogOutcome(known, { ok: false, reason, error: undefined })
+    assert.strictEqual(known.refreshFailed.reason, reason, `${reason} must be recorded as itself`)
+  }
 })
 
 test('the applier reports which previous failure it displaced', () => {
@@ -249,12 +298,31 @@ test('the refresh consults dispose on BOTH the success and the failure path', ()
     /fetchModels\(this\.region, credential, signal\)/,
     'the controller must actually reach the fetch — an unused one aborts nothing',
   )
-  // And dispose itself must fire it.
+  // And dispose itself must fire it. The abort moved into `dispose-order.ts`
+  // when the dispose order became testable (the reason it is worth reading
+  // there: `disposed` must be set before `clearInterval`, and that ordering
+  // lives beside the abort). The wiring assertion stays in index.ts — the
+  // effect must still delegate to the module rather than re-inline it.
   const dispose = /ctx\.effect\(\(\) => async \(\) => \{[\s\S]*?\n  \}\)/.exec(source)
   assert.ok(dispose !== null, 'src/host/index.ts no longer has the fiber effect cleanup')
   assert.match(
     dispose[0],
+    /disposeFiber\(/,
+    'the fiber cleanup must delegate to src/host/dispose-order.ts, not re-inline the order',
+  )
+  const order = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'host', 'dispose-order.ts'),
+    'utf8',
+  )
+  assert.match(
+    order,
     /refreshAbort\?\.abort\(\)/,
     'dispose must abort the in-flight catalog fetch, not only mark the runtime dead',
   )
+  // The ORDER is asserted EXECUTABLY in test/route-mount.test.js ("dispose marks
+  // a runtime dead BEFORE clearing its interval"), which watches the flag at
+  // the moment `clearInterval` is called. A regex cannot substitute: it sees
+  // where text sits, not when a statement runs. This file's job is to confirm
+  // the two halves are joined — the effect delegates, and the module it
+  // delegates to does abort.
 })

@@ -55,10 +55,10 @@ semver 把 `<0.2` 脱糖成 `<0.2.0-0`。宿主还开了 `includePrerelease: tru
 探针最后那张对照表就是用来当场验证这件事的，别在脑子里推。
 
 **3. 桌面 profile 里的插件副本会被宿主重写成 registry 版本。**
-把 `profiles/desktop/package.json` 的依赖改成 `link:<checkout>` 之后，`check-deploy-drift`
-会报 in sync——**但宿主启动时按依赖重装过一次，符号链接被换成了 npm 上的 0.3.2 真实目录**
-（2026-09-29 01:10 实证）。所以"改了仓库 + 显示 in sync"并不等于桌面版吃到了你的代码；
-判断依据是 `node scripts/check-deploy-drift.mjs` 报的是 `dev link` 还是 `DRIFT (installed vX)`。
+把 `profiles/desktop/package.json` 的依赖改成 `link:<checkout>` 之后，目录**看着**像链接——
+**但宿主启动时按依赖重装过一次，符号链接被换成了 npm 上的 0.3.2 真实目录**
+（2026-09-29 01:10 实证）。所以"改了仓库 + 看着像链接"并不等于桌面版吃到了你的代码；
+判断依据是那条路径**现在**是什么形态（链接还是拷贝），而不是改依赖那一刻的状态。
 
 ---
 
@@ -69,7 +69,7 @@ semver 把 `<0.2` 脱糖成 `<0.2.0-0`。宿主还开了 `includePrerelease: tru
 | **web 端** CLI 版本 | `~/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh/package.json`。注意它和桌面版**不是同一个宿主**，可能对不上 |
 | 上游有什么版本可升 | `npm view @deepseek-ai/dsh dist-tags`——`latest` 与 `next` 常常不是一回事（0.2.0-rc.1 当时只在 `next` 上） |
 | 谁被判不兼容 | `~/.dsh/logs/startup-*.log`：不兼容的插件会**点名**（`sensenova`、`trae` 就是这么发现的） |
-| 插件副本形态 | `node scripts/check-deploy-drift.mjs`（link / copy / 落后多少文件） |
+| 插件副本形态 | 看那条路径**现在**是不是符号链接：`dir ~/.dsh/profiles/<profile>/node_modules/@eghrhegpe/`（`<JUNCTION>` / `<SYMLINKDIR>` 是链接，真目录是拷贝）；链接指向本仓库才是"永远最新" |
 | 运行时是否真的可用 | web 服务监听 `3080`，卡片路由在 `/plugins/<plugin>/...`，可以直接 `fetch` 打——`/account` 返回裸 400 就是这样定位到"handler 进去后炸了"的 |
 
 **关于 3080 那条**：宿主 web server 的 catch-all 会把 handler 里抛出的异常应答成**没有 body 的 400**，

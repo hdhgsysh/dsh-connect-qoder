@@ -1,5 +1,5 @@
 /**
- * The eight @deepseek-ai/dsh-* peer ranges must admit every host the plugin
+ * The seven @deepseek-ai/dsh-* peer ranges must admit every host the plugin
  * is expected to run against, and must still refuse the NEXT generation.
  *
  * WHY HERE AND LIKE THIS
@@ -11,7 +11,7 @@
  * Every @deepseek-ai/dsh-* peer that FAILS is collected and surfaces as the
  * `incompatible-version` management failure — the plugin row goes red and the
  * host refuses to touch it. Nothing in this repository noticed when the
- * desktop app moved to 0.2.0-rc.1: the eight ranges still said `<0.2`, and a
+ * desktop app moved to 0.2.0-rc.1: the seven ranges still said `<0.2`, and a
  * pre-release runtime is not a 0.1.x runtime.
  *
  * THIS FILE HAS NO semver DEPENDENCY, DELIBERATELY
@@ -38,17 +38,27 @@ import assert from 'node:assert/strict'
 
 const REPO_ROOT = fileURLToPath(new URL('../', import.meta.url))
 
-/** Versions the plugin must keep working on, and why each one is here. */
+/**
+ * Versions the plugin must keep working on, and why each one is here.
+ *
+ * As of 0.5.0 the plugin targets the 0.2 host line only: the 0.1.x compat
+ * seams (the `installSection`/`setSource` branch, the `asVolatile` no-op,
+ * the `settingsScope` client probe) are cut, so the range floor moves up
+ * with them. The floor is `0.2.0-rc.0` rather than `0.2.0` because the
+ * host judges ranges with `includePrerelease: true` and a stable-`0.2.0`
+ * floor would reject the rc builds the field runs on — a prerelease sorts
+ * BELOW its stable version.
+ */
 const ADMIT = [
-  { version: '0.1.5', why: 'lower bound already declared' },
-  { version: '0.1.7', why: 'the 0.1.x line this plugin was written against' },
-  { version: '0.2.0-rc.1', why: 'the desktop build that turned the row red' },
+  { version: '0.2.0-rc.0', why: 'the declared floor' },
+  { version: '0.2.0-rc.2', why: 'the desktop build this checkout runs against' },
   { version: '0.2.0', why: '0.2.0 stable, once the rc lands' },
   { version: '0.2.7', why: 'later patches inside the same minor' },
 ]
 
-/** Versions the range must still refuse — the price of widening the lid. */
+/** Versions the range must still refuse. */
 const REFUSE = [
+  { version: '0.1.7', why: 'the 0.1.x line the 0.5.0 cut dropped: its ABI is no longer probed' },
   { version: '0.3.0', why: 'next minor: API changes are untested there' },
   { version: '1.0.0', why: 'next major' },
 ]
@@ -131,7 +141,7 @@ function checkedPeers() {
 
 test('every @deepseek-ai/dsh-* peer admits the host versions we run against', () => {
   const peers = checkedPeers()
-  assert.equal(peers.length, 8, `expected eight host-checked peers, found ${peers.length}`)
+  assert.equal(peers.length, 7, `expected seven host-checked peers, found ${peers.length}`)
   for (const [name, range] of peers) {
     for (const { version, why } of ADMIT) {
       assert.ok(satisfies(version, range), `${name} "${range}" rejects ${version} (${why})`)
@@ -148,14 +158,60 @@ test('widening the lid did not open the next generation', () => {
 })
 
 test('the peers outside the hosts check keep their own ranges', () => {
+  // Judged against the copy the host bundles, not its own gate: the floor
+  // is the 0.2 generation's bundle (cordis 4.0.4, schemastery ≥ 3.18.3).
+  // The host does not block installation on these — the ranges are this
+  // plugin's own contract about what it imports.
+  //
+  // pi-ai is the one that changed twice. The `^0.87.1` chosen at the 0.5.0
+  // cut refused the version every host actually bundles; the 0.5.1 fix
+  // declared `>=0.85.0 <0.88.0` against the desktop build and the
+  // standalone `dsh` 0.2.0-rc.1 CLI, both of which shipped
+  // `@earendil-works/pi-ai@0.85.1` when measured on 2026-10-03. That lid
+  // expired the same way: the 0.2 host line now bundles pi-ai 1.x, which
+  // `<0.88.0` refuses on paper. Widened to `<2.0.0` — the next major is
+  // still outside, which is the whole point of keeping a lid at all.
+  //
+  // The two imports this plugin makes (`createProvider`, `openAICompletionsApi`)
+  // are unchanged across 0.85.1 → 1.1.0: `dist/models.js` still exports
+  // `createProvider(input)`, and `dist/api/openai-completions.lazy.js` still
+  // exports `openAICompletionsApi()` (a `lazyApi` wrapper whose result carries
+  // `stream`, which is exactly what `createProvider`'s single-api fast path
+  // looks for). The 1.1.0 exports map covers `./api/*` and `./models`, so both
+  // specifiers resolve.
   const { peerDependencies: peers } = JSON.parse(readFileSync(`${REPO_ROOT}package.json`, 'utf8'))
-  assert.equal(peers['@deepseek-ai/cordis'], '>=4.0.2 <5.0.0')
-  assert.equal(peers['@deepseek-ai/schemastery'], '^3.18.2')
-  assert.equal(peers['@earendil-works/pi-ai'], '^0.85.1')
+  assert.equal(peers['@deepseek-ai/cordis'], '>=4.0.4 <5.0.0')
+  assert.equal(peers['@deepseek-ai/schemastery'], '^3.18.3')
+  assert.equal(peers['@earendil-works/pi-ai'], '>=0.85.0 <2.0.0')
 })
 
-test('the helper and the host agree on the case that started this', () => {
+test('the pi-ai range admits what the hosts bundle and refuses the next gen', () => {
+  // Golden values from semver 7.8.5 with the host's own includePrerelease:true,
+  // re-measured after each range change. The admission list is what hosts
+  // actually ship today; the refusal list is the line the plugin has never
+  // been tested on.
+  const { peerDependencies: peers } = JSON.parse(readFileSync(`${REPO_ROOT}package.json`, 'utf8'))
+  const range = peers['@earendil-works/pi-ai']
+  for (const [version, why] of [
+    ['0.85.1', 'bundled by the desktop build and the standalone dsh 0.2.0-rc.1 CLI'],
+    ['0.86.0', 'the minor between the two known floors'],
+    ['0.87.1', 'the version the 0.5.0 cut was validated against'],
+    ['0.88.0', 'the lid the 0.5.1 fix drew, now inside the range'],
+    ['1.0.0', 'the next generation, now what the 0.2 host line bundles'],
+    ['1.1.0', 'shipped inside the desktop build the field runs on'],
+  ]) {
+    assert.ok(satisfies(version, range), `${range} rejects pi-ai ${version} (${why})`)
+  }
+  for (const version of ['0.84.9', '2.0.0', '2.1.0']) {
+    assert.ok(!satisfies(version, range), `${range} now admits pi-ai ${version} (next generation)`)
+  }
+})
+
+test('the helper and the host agree on the range the 0.5.0 cut chose', () => {
   // Golden values from semver 7.8.5 with the hosts own includePrerelease:true.
-  assert.equal(satisfies('0.2.0-rc.1', '>=0.1.5 <0.2'), false, 'the old range must still be recognised as the failure it was')
-  assert.equal(satisfies('0.2.0-rc.1', '>=0.1.5 <0.3'), true, 'and the new one must fix it')
+  // The 0.1.x floor is now refused on purpose: those hosts carry the
+  // installSection/settingsScope ABI the 0.5.0 cut dropped.
+  assert.equal(satisfies('0.1.7', '>=0.2.0-rc.0 <0.3'), false, 'the 0.1.x line must stay out after the cut')
+  assert.equal(satisfies('0.2.0-rc.2', '>=0.2.0-rc.0 <0.3'), true, 'the rc builds the field runs on must come in')
+  assert.equal(satisfies('0.2.0', '>=0.2.0-rc.0 <0.3'), true, 'and the stable release when it lands')
 })

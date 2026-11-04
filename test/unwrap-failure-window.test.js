@@ -26,6 +26,8 @@
  * And the one that is NOT a property: the recorded reason stays readable inside
  * the window. Suppressing the retry must not blank the explanation.
  */
+// @ts-check
+
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 

@@ -40,9 +40,9 @@ import {
   loadCredential,
   loadCredentialAsync,
   loadEnvCredential,
-  describeUnwrapFailure as readUnwrapFailure,
   appDataRootFor,
 } from './credentials.ts'
+import { describeUnwrapFailure as readUnwrapFailure } from './oscrypt-unwrap.ts'
 import type { Region } from './domain.ts'
 
 /** The four states {@link readAccountState} can return. */
@@ -80,9 +80,21 @@ export interface AccountIdentity {
  * The state record the card receives.
  *
  * `identity` and `detail` are typed as present-but-possibly-undefined rather
- * than optional because the payload builder writes every key on purpose — the
- * card's checks are then property reads rather than `in` checks on keys that
- * might be missing.
+ * than optional so that a reader of THIS type sees two keys that always exist.
+ * Do not repeat the claim that used to sit here — that the payload builder
+ * writes every key so the card can use property reads instead of `in` checks.
+ * It is false on the wire, and measurably so: the payload goes out through
+ * `sendJson`, i.e. `JSON.stringify`, and `JSON.stringify` DROPS any key whose
+ * value is `undefined`. `{region:'cn', identity:undefined}` serialises to
+ * `{"region":"cn"}` — verified, not inferred. A card that took the old comment
+ * at its word and read `payload.identity.name` without a guard would throw.
+ *
+ * The client is safe because it does the opposite of what the old comment
+ * described: it reads with `?? undefined`-style tolerance, treating a missing
+ * key and an undefined one alike. The type above remains useful as the
+ * statement of intent for the in-process builder — it is the SERIALISED form
+ * that has fewer keys than the type promises, and that is a property of
+ * `JSON.stringify`, not something this module can fix by writing the key.
  */
 export interface AccountStateRecord {
   region: string
@@ -90,8 +102,8 @@ export interface AccountStateRecord {
   manageUrl?: string
   downloadUrl?: string
   state: AccountState
-  source?: string
-  appName?: string
+  source: string | undefined
+  appName: string | undefined
   identity: AccountIdentity | undefined
   detail: string | undefined
 }
@@ -113,33 +125,9 @@ function probeDirs(region: AccountRegion, appDataRoot: string): Array<{ name: st
 
 /**
  * Read one region's sign-in state from local evidence.
- *
- * @param region - one entry of `REGIONS`.
- * @param appDataRoot - the application-data root the region's app directories
- *   live under; `undefined` falls back to `appDataRootFor()` (per-platform:
- *   `%APPDATA%`, `~/Library/Application Support`, or `$XDG_CONFIG_HOME`/`~/.config`),
- *   and `''` when none can be determined, which reads as "no app present".
- * @param options - dependency overrides, all optional:
- *   `loadCredential` / `loadEnvCredential` (the store readers) and
- *   `describeUnwrapFailure` (the recorded-cause reader).
- * @param options.cachedOnly - when true, the store reader is asked NOT to
- *   unwrap a new OSCrypt key. This is what the card's account route uses: the
- *   route runs on every panel render, and an unwrap is a synchronous PowerShell
- *   child with a 30 s timeout, so a machine that cannot unwrap would block the
- *   host's event loop once per render instead of showing the `needs-app` state
- *   the panel exists to explain (issue 07). The consequence is deliberate and
- *   visible: until something else unwraps the key — the startup refresh, the
- *   periodic catalog refresh, or the user pressing "重读登录" — the panel reads
- *   `needs-app`. That is the same state it would have shown anyway, reached
- *   without the freeze.
- * @param options.force - when true, bypass the unwrap failure window and read
- *   the store for real. This is the counterpart to `cachedOnly`, for the one
- *   request that IS a user-initiated re-read; without it, pressing "重读登录"
- *   inside the window would silently do nothing.
- * @returns a state record shaped as
- *   `{ region, displayName, manageUrl, downloadUrl, state, source, appName, identity, detail }`,
- *   where `identity` is `{ name, email, expiresAt? }` or `undefined`, and
- *   carries no credential material of any kind.
+ * @param options.cachedOnly - no OSCrypt unwrap: the route runs on every render.
+ * @param options.force - read for real, bypassing the unwrap failure window.
+ * @returns the `AccountStateRecord` for the region, carrying no credential material.
  */
 export interface ReadAccountStateOptions {
   force?: boolean

@@ -39,7 +39,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { classifyUpstreamError } from '../src/host/errors.ts'
-import { queueWaitFor } from '../src/host/upstream.ts'
+import { queueWaitFor, streamChat } from '../src/host/upstream.ts'
 
 /**
  * The frame as it arrives, at the nesting the gateway actually uses.
@@ -121,6 +121,30 @@ test('the limit is recognised by code alone, and by message alone', () => {
   )
 })
 
+test('the upstream string code "daily_limit_exceeded" is its own kind, not a generic upstream error', () => {
+  // Upstream switched from the numeric `110` (prose "Billing daily count
+  // exceeded") to the string code `daily_limit_exceeded` whose prose is
+  // "Qoder's daily request allowance for this account is used up…". That prose
+  // contains NONE of the substrings the daily-limit regex used to match, so
+  // without an explicit code match it fell through to `kind:'upstream'` — losing
+  // the friendly off-peak/check-in message and the retryable:false guarantee.
+  const verdict = classifyUpstreamError(
+    {},
+    'daily_limit_exceeded',
+    "Qoder's daily request allowance for this account is used up. Waiting within the session will not help; the off-peak price (22:00–08:00 Asia/Shanghai) and the daily check-in both still work.",
+  )
+  assert.strictEqual(verdict.kind, 'daily-limit', 'must not regress to upstream on the new code')
+  assert.notStrictEqual(verdict.kind, 'upstream', 'the new code must not be reported as a generic upstream error')
+  assert.notStrictEqual(verdict.kind, 'rate-limit', 'the new code must not be read as a retryable queue')
+})
+
+test('the new code by itself, with no helpful prose, is still a daily limit', () => {
+  // The code alone must decide, because upstream may send the bare code without
+  // the explanatory message on other surfaces.
+  assert.strictEqual(classifyUpstreamError({}, 'daily_limit_exceeded', '').kind, 'daily-limit')
+  assert.strictEqual(classifyUpstreamError({}, '"daily_limit_exceeded"', '').kind, 'daily-limit')
+})
+
 test('a real queue is still a queue — the new branch must not swallow it', () => {
   // The counterpart, because a fix that turns every retryable failure into a
   // hard failure would trade one wrong answer for another. A `10605` with the
@@ -141,4 +165,133 @@ test('the daily limit is never waited out, however much budget is left', () => {
   // The contrast: a genuine queue with the same hint DOES sleep, so the
   // assertion above is about the kind and not about the helper being broken.
   assert.ok(queueWaitFor({ retryable: true, retryAfterSeconds: 7350 }, 0, 1) > 0)
+})
+
+/* ---------------------------------------------------------------------------
+ * THE HTTP CARRIER (docs/issues/23-upstream-429-daily-limit.md)
+ *
+ * Everything above classifies a FRAME. Upstream then delivered the same verdict
+ * as a plain `429` with the verdict only in the body:
+ *
+ *   429: {"message":"Qoder's daily request allowance for this account is used
+ *         up…","type":"daily_limit_exceeded","code":"daily_limit_exceeded"}
+ *
+ * The classifier was already right about that body. The gate in FRONT of it was
+ * not: `streamChat` read the HTTP status first, so a 429 became a queue before
+ * any body was read, and the plugin spent its full two-minute budget on twelve
+ * attempts (measured: probe/http-429-daily-limit-probe.mjs) and then handed DSH
+ * a `rate_limit`, which the host retried five more times.
+ *
+ * These tests drive the real `streamChat` against a `fetch` stub, because that
+ * is the only place the retry ladder is visible: the error a caller receives is
+ * the same either way, but the number of requests it cost is not.
+ * ------------------------------------------------------------------------- */
+
+const REGION = { id: 'qoder', displayName: 'Qoder', baseUrl: 'https://gateway.example' }
+const CREDENTIAL = { userID: 'u-test', token: 'tok-test', name: 'n', email: 'e@x', machineID: 'm' }
+const CHAT_REQUEST = {
+  model: 'model-key',
+  messages: [{ role: 'user', content: 'hi' }],
+  tools: [],
+  maxTokens: undefined,
+  enableThinking: false,
+  alwaysThinking: false,
+  reasoningEffort: undefined,
+  sessionId: 's-test',
+}
+
+/** The 429 body as the newer gateway sends it — the report's own wording. */
+const LIVE_429_BODY = JSON.stringify({
+  message:
+    "Qoder's daily request allowance for this account is used up. Waiting within the session will not help; " +
+    'the off-peak price (22:00–08:00 Asia/Shanghai) and the daily check-in both still work.',
+  type: 'daily_limit_exceeded',
+  code: 'daily_limit_exceeded',
+})
+
+/**
+ * Drive one real chat turn against a scripted reply sequence.
+ *
+ * The last reply is reused once the script runs out, so a case that regresses
+ * into retrying reports a large `calls` instead of hanging until the timeout.
+ * The timeout is the backstop for exactly that regression, not a wait anyone
+ * should expect to hit.
+ */
+async function driveChat(replies, { timeoutMs = 8000 } = {}) {
+  const original = globalThis.fetch
+  let calls = 0
+  globalThis.fetch = async () => {
+    const reply = replies[Math.min(calls, replies.length - 1)]
+    calls += 1
+    return new Response(reply.text, {
+      status: reply.status,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+  const started = Date.now()
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  let error
+  try {
+    for await (const chunk of streamChat(REGION, CREDENTIAL, CHAT_REQUEST, controller.signal)) {
+      void chunk
+    }
+  } catch (thrown) {
+    error = thrown
+  } finally {
+    clearTimeout(timer)
+    globalThis.fetch = original
+  }
+  return { calls, elapsedMs: Date.now() - started, error }
+}
+
+test('a 429 carrying the daily-limit body is not retried at all', async () => {
+  const { calls, elapsedMs, error } = await driveChat([{ status: 429, text: LIVE_429_BODY }])
+  assert.strictEqual(calls, 1, 'one attempt — the queue ladder must not be entered')
+  assert.strictEqual(error?.name, 'DailyLimitRejection')
+  assert.strictEqual(error?.dailyLimit, true)
+  assert.strictEqual(error?.retryable, false)
+  // Before the fix this was twelve attempts and ~120 s (the whole budget). The
+  // bound is loose on purpose: what it separates is "no ladder" from "one
+  // ladder", which differ by two orders of magnitude.
+  assert.ok(elapsedMs < 5000, `no ladder wait expected, took ${elapsedMs} ms`)
+})
+
+test('a 429 that is a REAL queue is still waited out — only the daily limit stops the ladder', async () => {
+  // The counterpart, because "429 is terminal" would be a different wrong
+  // answer. The queue reply must still be retried; the daily-limit reply that
+  // follows it must stop the turn there rather than keep spending the budget.
+  const queue = JSON.stringify({
+    code: '10605',
+    message: JSON.stringify({
+      isQueued: true,
+      queueType: 'DEFAULT',
+      retryAfterSeconds: 1,
+      serviceAvailable: true,
+    }),
+  })
+  const { calls, error } = await driveChat([
+    { status: 429, text: queue },
+    { status: 429, text: LIVE_429_BODY },
+  ])
+  assert.strictEqual(calls, 2, 'the queue reply was retried once, then the daily limit stopped the turn')
+  assert.strictEqual(error?.name, 'DailyLimitRejection')
+})
+
+test('the daily-limit failure carries the wording the host quota predicate looks for', async () => {
+  // Load-bearing coupling, not decoration. DSH cannot see `retryable`: the shim
+  // hands it an HTTP status and a message, and the host classifies on those.
+  // `dsh-llm-pi-ai`'s `classifyPiAiError` tests `isQuotaExceededError` BEFORE
+  // its `\b429\b|rate.?limit` rule, so `RATE_LIMIT` (in the host's retryable
+  // set) is what a message without quota wording falls through to, and
+  // `QUOTA` is what this phrase buys. `probe/host-retry-classification-probe.mjs`
+  // checks the phrase against the installed host's own predicate; this is the
+  // cheap guard that keeps a reword from silently dropping it.
+  const { error } = await driveChat([{ status: 429, text: LIVE_429_BODY }])
+  const message = String(error?.message ?? '')
+  assert.match(message, /daily quota exhausted/i)
+  // The host's rule is `(?:quota|usage limit)[\s_-]+(?:exceeded|exhausted|reached)`,
+  // so the two words have to stay adjacent: "quota is exhausted" would NOT
+  // match, and nothing else in this sentence does.
+  assert.match(message, /\bquota[\s_-]+exhausted\b/i, 'the host needs the two words adjacent')
 })

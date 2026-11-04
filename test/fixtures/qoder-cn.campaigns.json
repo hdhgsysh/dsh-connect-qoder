@@ -1,0 +1,32 @@
+{
+  "_meta": {
+    "region": "qoder-cn",
+    "kind": "campaigns",
+    "capturedAt": "2026-10-18T00:00:00.000Z",
+    "pluginShapeReader": "accepted",
+    "sanitized": true,
+    "note": "Seeded fixture. A campaigns document may omit the `campaigns` ARRAY when nothing is running and still carry the banner/claimable envelope fields; this one carries both, which is the ordinary case on a live account. Campaign ids and the uid are placeholders. Regenerate with `node probe/capture-fixtures.mjs` on a machine with a Qoder sign-in."
+  },
+  "body": {
+    "campaigns": [
+      {
+        "id": "c-daily-checkin-20261018",
+        "title": "每日签到",
+        "action_type": "checkin",
+        "claim_status": "unclaimed",
+        "placement": "USAGE"
+      },
+      {
+        "id": "c-limit-promo-202610",
+        "title": "限时特惠",
+        "action_type": "bundle",
+        "claim_status": "claimed",
+        "placement": "USAGE",
+        "end_at": "2026-10-31T00:00:00.000Z"
+      }
+    ],
+    "uid": "<redacted>",
+    "showCampaign": true,
+    "claimable": true
+  }
+}

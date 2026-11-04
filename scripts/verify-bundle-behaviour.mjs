@@ -27,22 +27,24 @@
 import { readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 
-const baselineRef = process.argv.includes('--baseline')
+const explicitBaseline = process.argv.includes('--baseline')
   ? process.argv[process.argv.indexOf('--baseline') + 1]
-  : 'HEAD'
+  : undefined
 
 const NEW = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
 
 /**
  * The baseline bundle, or `undefined` when the ref carries none.
  *
- * `lib/` is a build artifact and no longer tracked (see .gitignore), so the
- * day will come when `${baselineRef}:lib/client.js` simply is not there any
- * more — which is not a reason to fail, and must not be confused with "the
- * rebuild differs". `build-client.mjs` already refuses to write a bundle that
- * does not reproduce `src/client/` byte-for-byte, so freshness is enforced at
- * the point where it can actually be enforced; this script's job is the
- * narrower question of behaviour drift against a KNOWN-GOOD shipped bundle.
+ * `lib/` is a versioned build artifact (docs/issues/19): committed alongside its
+ * sources, with CI's `git diff` gate keeping it fresh against `src/`. But refs
+ * that predate the commit which started tracking `lib/` carry no `lib/client.js`
+ * — `${baselineRef}:lib/client.js` simply is not there any more — which is not a
+ * reason to fail, and must not be confused with "the rebuild differs".
+ * `build-client.mjs` already refuses to write a bundle that does not reproduce
+ * `src/client/` byte-for-byte, so freshness is enforced at the point where it
+ * can actually be enforced; this script's job is the narrower question of
+ * behaviour drift against a KNOWN-GOOD shipped bundle.
  */
 const readBaseline = (ref) => {
   try {
@@ -55,18 +57,90 @@ const readBaseline = (ref) => {
   }
 }
 
-const OLD = readBaseline(baselineRef)
+/**
+ * A baseline ref whose bundle genuinely DIFFERS from the worktree artifact.
+ *
+ * WHY THIS IS AUTOMATIC RATHER THAN `HEAD` OR `HEAD^`
+ *
+ * The default used to be `HEAD`, and in CI that is always vacuous: the job runs
+ * `npm run build` and then `git diff --exit-code -- lib`, so by the time this
+ * script runs, `HEAD:lib/client.js` IS the worktree file. It printed
+ * "OK (vacuous)" and exited 0 — a green step that had proven nothing, which is
+ * the failure mode this whole script exists to catch, wearing the script's own
+ * uniform.
+ *
+ * `HEAD^` does not fix it either, and the reason is worth stating because it is
+ * easy to "fix" this into a different vacuity: `lib/client.js` is untouched by
+ * most commits, so `HEAD^` is byte-identical to `HEAD` for as long as nobody has
+ * edited the card. On this branch it was identical for 24 consecutive commits.
+ * Any fixed ref is the wrong answer; the right question is "the newest ref whose
+ * artifact DIFFERS from mine".
+ *
+ * So walk history and report the artifact drift the run actually covers. A
+ * bundle that matches HEAD across the whole window is not compared against
+ * itself by accident — it is compared against a window that is honestly
+ * reported as empty, and {@link baselineIsSelf} then fails the step instead of
+ * blessing it.
+ *
+ * `--baseline <ref>` still wins when passed, so a caller can pin a release
+ * explicitly and compare across a large distance.
+ */
+const findDifferingBaseline = () => {
+  let refs
+  try {
+    refs = execFileSync('git', ['log', '--format=%H', '-n', '80', 'HEAD'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim().split('\n').filter(Boolean)
+  } catch {
+    return undefined
+  }
+  // Newest first: the closest differing artifact is the tightest regression
+  // window, and it is the one a reviewer can actually hold in their head.
+  for (const ref of refs) {
+    const candidate = readBaseline(ref)
+    if (candidate !== undefined && candidate !== NEW) return { ref, source: candidate }
+  }
+  // Nothing in the window differs — the caller gets HEAD so the self-comparison
+  // is visible and reported rather than silently skipped.
+  return undefined
+}
+
+const found = explicitBaseline === undefined ? findDifferingBaseline() : undefined
+const baselineRef = explicitBaseline ?? found?.ref ?? 'HEAD'
+const OLD = explicitBaseline === undefined && found !== undefined ? found.source : readBaseline(baselineRef)
+
+/**
+ * Whether this clone is too shallow for {@link findDifferingBaseline} to work.
+ *
+ * Distinguished from "history was walked and nothing differed", because the two
+ * need opposite advice and produce the same downstream symptom (a self-baseline
+ * and therefore a failure). A shallow clone is the CI default for
+ * `actions/checkout`, so this is the likely case in practice, and telling the
+ * reader to pass `--baseline` would be wrong — there is no local ref to pass.
+ */
+const isShallow = () => {
+  try {
+    return execFileSync('git', ['rev-parse', '--is-shallow-repository'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim() === 'true'
+  } catch {
+    return false
+  }
+}
 
 if (OLD === undefined) {
   process.stderr.write(
     `\n[verify:bundle] SKIPPED — \`${baselineRef}:lib/client.js\` is not in git.\n` +
-    `[verify:bundle]   \`lib/\` is a build artifact and untracked (.gitignore), so there is\n` +
-    `[verify:bundle]   no shipped bundle at that ref to compare behaviour against. This is\n` +
-    `[verify:bundle]   expected, not a regression: freshness is enforced by the byte-for-byte\n` +
-    `[verify:bundle]   check \`scripts/build-client.mjs\` runs on every build (it fails the build\n` +
-    `[verify:bundle]   when the artifact does not reproduce src/client/), and the card's\n` +
-    `[verify:bundle]   behaviour by test/client-bundle.test.js, test/card-host-parity.test.js\n` +
-    `[verify:bundle]   and test/theme-token-contract.test.js.\n` +
+    `[verify:bundle]   \`lib/\` is a versioned build artifact (docs/issues/19): refs that\n` +
+    `[verify:bundle]   predate the commit which started tracking it carry no shipped bundle\n` +
+    `[verify:bundle]   to compare behaviour against. This is expected, not a regression:\n` +
+    `[verify:bundle]   freshness is enforced by the byte-for-byte check \`scripts/build-client.mjs\`\n` +
+    `[verify:bundle]   runs on every build (it fails the build when the artifact does not\n` +
+    `[verify:bundle]   reproduce src/client/), by CI's \`git diff --exit-code -- lib\` gate, and\n` +
+    `[verify:bundle]   the card's behaviour by test/client-bundle.test.js,\n` +
+    `[verify:bundle]   test/card-host-parity.test.js and test/theme-token-contract.test.js.\n` +
     `[verify:bundle]   To compare against a specific earlier release, pass a ref that still\n` +
     `[verify:bundle]   carries the artifact: node scripts/verify-bundle-behaviour.mjs --baseline <ref>\n\n`,
   )
@@ -305,10 +379,26 @@ for (let i = 0; i < Math.max(oldPrint.length, newPrint.length); i++) {
 /**
  * The off-peak gate is checked separately from the fingerprints: it is the one
  * line whose loss is silent (the card shows a discount the user is never
- * charged), and it is the needle `check-deploy-drift.mjs` looks for too.
+ * charged), so it is checked on its own instead of only as a fingerprint.
  */
 const gateOld = OLD.includes('promo.active !== true')
 const gateNew = NEW.includes('promo.active !== true')
+
+/**
+ * A byte-identical baseline makes every probe below vacuous.
+ *
+ * This is the normal case in CI, and it is nobody's fault: the `build` job runs
+ * `npm run build` and then `git diff --exit-code -- lib`, so by the time this
+ * script runs the worktree artifact IS the baseline commit's artifact. Comparing
+ * it against itself yields `IDENTICAL` for 8400 calls and proves nothing.
+ *
+ * It is still worth printing rather than skipping, because the same run in a
+ * developer's tree — sources edited, rebuilt, not yet committed — is the case
+ * this script exists for, and there `OLD` and `NEW` genuinely differ. The line
+ * below is what stops the vacuous run from being READ as evidence of the
+ * meaningful one.
+ */
+const baselineIsSelf = OLD === NEW
 
 console.log(`\n${PROBES.length} probes x ${oldPrint.length} calls, baseline=${baselineRef}`)
 console.log(`behaviour: ${diffs === 0 ? 'IDENTICAL' : `${diffs} differing call(s)`}`)
@@ -317,8 +407,38 @@ if (newFingerprint.missing.length > 0) {
   console.log(`absent from the rebuild: ${newFingerprint.missing.join(', ')}`)
 }
 
+if (baselineIsSelf) {
+  // Two causes, opposite fixes — so they are reported separately rather than
+  // behind one generic "compare against a ref that differs".
+  if (explicitBaseline === undefined && isShallow()) {
+    console.log(
+      `\nNOT EVIDENCE: this is a SHALLOW clone, so the walk that looks for a baseline\n` +
+      `  whose artifact differs had no history to search and fell back to HEAD — which\n` +
+      `  is this same artifact. These ${oldPrint.length} calls compared the bundle with\n` +
+      `  itself.\n` +
+      `  Fix the checkout, not this script: \`fetch-depth: 0\` on actions/checkout.\n` +
+      `  (The workflow's \`build\` job sets it for exactly this reason.)`,
+    )
+  } else {
+    console.log(
+      `\nNOT EVIDENCE: \`${baselineRef}:lib/client.js\` is byte-identical to the worktree\n` +
+      `  artifact, so these ${oldPrint.length} calls compared the bundle with itself. It would\n` +
+      `  pass on a bundle whose sources no longer match it — which is the drift this script\n` +
+      `  is for. This is a FAILURE rather than a vacuous pass, because a green step that\n` +
+      `  cannot fail is worse than no step at all.\n` +
+      `  Fix it by giving this run something to compare against:\n` +
+      `    node scripts/verify-bundle-behaviour.mjs --baseline <ref>\n` +
+      `  (Freshness itself is unaffected and still proven by \`git diff --exit-code -- lib\`\n` +
+      `  and by scripts/build-client.mjs's byte-for-byte check.)`,
+    )
+  }
+}
+
 if (diffs !== 0 || !gateNew || newFingerprint.missing.length > 0) {
   console.log('\nFAIL: the rebuilt bundle does not behave like its baseline.')
+  process.exitCode = 1
+} else if (baselineIsSelf) {
+  console.log('FAIL (vacuous): the baseline IS this artifact, so nothing was compared.')
   process.exitCode = 1
 } else {
   console.log('OK: the rebuilt bundle behaves like its baseline on every probed call.')

@@ -1,0 +1,67 @@
+{
+  "_meta": {
+    "region": "qoder-cn",
+    "kind": "model-catalog",
+    "capturedAt": "2026-10-18T00:00:00.000Z",
+    "pluginShapeReader": "accepted",
+    "sanitized": false,
+    "note": "Seeded fixture. The envelope is derived from the real measured shape — an object keyed by product surface, each value an ARRAY, `chat` always present, an empty surface expressed as `[]` — as recorded by `probe/model-shape.mjs` and `docs/issues/04`. Model names/keys are representative placeholders, NOT a live capture. Regenerate with `node probe/capture-fixtures.mjs` on a machine with a Qoder sign-in to replace this with a genuine live snapshot."
+  },
+  "body": {
+    "chat": [
+      {
+        "key": "qwen3-coder-plus",
+        "display_name": "Qwen3 Coder Plus",
+        "enable": true,
+        "is_vl": false,
+        "is_reasoning": true,
+        "is_default": true,
+        "max_input_tokens": 131072,
+        "context_config": {
+          "128K": { "token_count": 131072, "is_default": true },
+          "1M": { "token_count": 1048576 }
+        },
+        "thinking_config": {
+          "enabled": { "efforts": { "high": {}, "max": {} } },
+          "disabled": {}
+        },
+        "price_factor": 1.0
+      },
+      {
+        "key": "qwen3-vl-plus",
+        "display_name": "Qwen3 VL Plus",
+        "enable": true,
+        "is_vl": true,
+        "is_reasoning": false,
+        "is_default": false,
+        "max_input_tokens": 65536,
+        "context_config": {
+          "64K": { "token_count": 65536, "is_default": true }
+        },
+        "thinking_config": {
+          "enabled": { "efforts": {} }
+        },
+        "price_factor": 0.5
+      }
+    ],
+    "developer": [
+      {
+        "key": "qwen3-coder-dev",
+        "display_name": "Qwen3 Coder Developer",
+        "enable": false,
+        "is_vl": false,
+        "is_reasoning": true,
+        "max_input_tokens": 131072,
+        "context_config": {
+          "128K": { "token_count": 131072, "is_default": true }
+        },
+        "thinking_config": {
+          "enabled": { "efforts": { "high": {}, "max": {} } },
+          "disabled": {}
+        },
+        "price_factor": 2.0
+      }
+    ],
+    "quest": []
+  }
+}

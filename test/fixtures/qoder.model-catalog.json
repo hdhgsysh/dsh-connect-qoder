@@ -1,0 +1,48 @@
+{
+  "_meta": {
+    "region": "qoder",
+    "kind": "model-catalog",
+    "capturedAt": "2026-10-18T00:00:00.000Z",
+    "pluginShapeReader": "accepted",
+    "sanitized": false,
+    "note": "Seeded fixture for the GLOBAL edition. Per `probe/model-shape.mjs` the global edition has NO `developer` group — so its absence is NOT drift; the replay suite asserts that a shape reader must keep accepting a catalog that lacks a sibling group. Model names/keys are representative placeholders. Regenerate with `node probe/capture-fixtures.mjs` on a machine with a Qoder sign-in."
+  },
+  "body": {
+    "chat": [
+      {
+        "key": "claude-sonnet-4",
+        "display_name": "Claude Sonnet 4",
+        "enable": true,
+        "is_vl": false,
+        "is_reasoning": false,
+        "is_default": true,
+        "max_input_tokens": 200000,
+        "context_config": {
+          "200K": { "token_count": 200000, "is_default": true }
+        },
+        "thinking_config": {
+          "enabled": { "efforts": { "high": {} } },
+          "disabled": {}
+        },
+        "price_factor": 1.0
+      },
+      {
+        "key": "gpt-5-codex",
+        "display_name": "GPT-5 Codex",
+        "enable": true,
+        "is_vl": false,
+        "is_reasoning": true,
+        "is_default": false,
+        "max_input_tokens": 128000,
+        "context_config": {
+          "128K": { "token_count": 128000, "is_default": true }
+        },
+        "thinking_config": {
+          "enabled": { "efforts": {} }
+        },
+        "price_factor": 1.5
+      }
+    ],
+    "byok_teams": []
+  }
+}

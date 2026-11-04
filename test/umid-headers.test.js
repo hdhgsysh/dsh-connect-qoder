@@ -1,6 +1,7 @@
 /**
  * Unit tests for the umid machine-identity block's effect on
- * `openApiHeaders` in `src/host/upstream.ts`.
+ * `openApiHeaders` in `src/host/upstream/headers.ts` (was
+ * `src/host/upstream.ts` before the 2026-10-17 split, `docs/issues/22`).
  *
  * The international campaigns endpoint serves the daily CLAIM_BENEFIT round
  * only to requests carrying the desktop app's umid values; when the block
@@ -20,7 +21,7 @@
 import { test, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 
-const { openApiHeaders, __dshQoderUmidCacheReset } = await import('../src/host/upstream.ts')
+const { openApiHeaders, __dshQoderUmidCacheReset, __dshQoderUmidState } = await import('../src/host/upstream.ts')
 
 beforeEach(() => {
   globalThis.__dshQoderUmidProbe = null
@@ -96,4 +97,32 @@ test('the cache is independent of the region argument', () => {
   openApiHeaders(CREDENTIAL, cnRegion)
   openApiHeaders(CREDENTIAL, REGION)
   assert.equal(runs, 1, 'the block is machine-scoped, so a region change must not re-read it')
+})
+
+// --- the observability seam the activation warn reads ------------------------
+
+test('__dshQoderUmidState reports availability when the read yields a block', () => {
+  globalThis.__dshQoderUmidProbe = () => ({ machineToken: 'tk', machineType: 'tp', machineCode: 'cd' })
+  const state = __dshQoderUmidState()
+  assert.equal(state.available, true, 'a complete block is the available answer')
+  assert.equal('reason' in state, false, 'availability carries no reason')
+})
+
+test('__dshQoderUmidState reports the degradation with a reason the log can name', () => {
+  globalThis.__dshQoderUmidProbe = () => null
+  const state = __dshQoderUmidState()
+  assert.equal(state.available, false, 'a null read is the unavailable answer')
+  assert.equal(typeof state.reason, 'string', 'the reason must exist for the warn to use')
+  assert.match(state.reason, /umid/)
+})
+
+test('__dshQoderUmidState reflects the cached read, not a re-run', () => {
+  let runs = 0
+  globalThis.__dshQoderUmidProbe = () => {
+    runs += 1
+    return { machineToken: 'tk', machineType: 'tp', machineCode: 'cd' }
+  }
+  assert.equal(__dshQoderUmidState().available, true)
+  assert.equal(__dshQoderUmidState().available, true)
+  assert.equal(runs, 1, 'the state seam must not re-run the read past the per-process cache')
 })

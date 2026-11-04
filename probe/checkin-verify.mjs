@@ -6,9 +6,9 @@
  *
  * Run: node probe/checkin-verify.mjs
  */
-import { REGIONS, loadCredential } from '../lib/credentials.js'
-import { readCampaigns, campaignsUrl } from '../lib/upstream.js'
-import { checkinStateFrom, claimableCampaignOf, campaignIsClaimed } from '../lib/claim.js'
+import { REGIONS, loadCredential } from '../src/host/credentials.ts'
+import { readCampaigns, campaignsUrl } from '../src/host/upstream.ts'
+import { checkinStateFrom, claimableCampaignOf, campaignIsClaimed } from '../src/host/claim.ts'
 
 function redact(value) {
   return typeof value === 'string' && value.length > 0 ? `${value.slice(0, 8)}…(${value.length})` : '(none)'

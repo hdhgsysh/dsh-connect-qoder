@@ -1,4 +1,116 @@
 /**
+ * The `message` of a thrown value, as a string, or `''` when it has none.
+ *
+ * A catch block's binding is `unknown` (`useUnknownInCatchVariables` is on), so
+ * `.message` is not readable without narrowing first. This is that narrowing,
+ * written once instead of as `String((error as { message?: unknown })?.message ?? error)`
+ * at each of the two dozen catch sites — a spelling that also quietly loses the
+ * non-Error throw (a bare string, a rejected non-object) by stringifying
+ * `undefined` into the word "undefined".
+ *
+ * Deliberately narrow: it reads ONE field off a value it does not trust, and
+ * answers `''` rather than inventing a description. Callers that need the
+ * original value stringified should use {@link describeThrown}.
+ *
+ * @param error - the thrown value.
+ * @returns its `message` when that is a string, otherwise `''`.
+ */
+export function errorMessage(error: unknown): string {
+  const message = (error as { message?: unknown } | null | undefined)?.message
+  return typeof message === 'string' ? message : ''
+}
+
+/**
+ * A human-readable description of a thrown value, whatever it turned out to be.
+ *
+ * The three cases that actually occur, in the order that reads best:
+ *
+ * 1. an `Error` (or anything with a string `message`) — its message;
+ * 2. a bare string thrown by hand — the string itself;
+ * 3. anything else (a rejection carrying an object, `undefined`) — `String()`.
+ *
+ * The reason this is not just `String(error)` is that it turns an `Error` into
+ * `"Error: the real reason"`, prefixing the noise the caller is trying to read
+ * past. The reason it is not just `error.message` is that a non-Error throw
+ * then arrives as the literal text `"undefined"`, which is how a bare string
+ * rejection reached the account panel as an empty-looking message.
+ *
+ * @param error - the thrown value.
+ * @returns a non-empty description; `'undefined'` only for an actual `undefined` throw.
+ */
+export function describeThrown(error: unknown): string {
+  const message = errorMessage(error)
+  if (message !== '') return message
+  if (typeof error === 'string') return error
+  return String(error)
+}
+
+/**
+ * Read a flag or field off a thrown value, without trusting its shape.
+ *
+ * The shim and the classifier both hang their own flags on errors
+ * (`retryable`, `dailyLimit`, `signInExpired`, `protocolShapeChanged`) precisely
+ * because the value crosses a throw boundary and may lose its prototype on the
+ * way. Reading those flags off an `unknown` binding is the same narrowing every
+ * time, so it is written once here.
+ *
+ * `key` is one of the known flag names, NOT an arbitrary string: a helper that
+ * accepts any key would let a typo (`'retryble'`) compile and read `undefined`
+ * forever, which is the failure mode this whole file exists to avoid.
+ *
+ * @param error - the thrown value.
+ * @param key - the field to read.
+ * @returns the field's value, still `unknown` — callers compare it, never
+ *   assume it. An absent field and a `null` one both answer `undefined`.
+ */
+export function thrownFlag(error: unknown, key: ThrownFlag): unknown {
+  return (error as Record<string, unknown> | null | undefined)?.[key]
+}
+
+/** The flag names {@link thrownFlag} will read. A literal union, so typos fail to compile. */
+export type ThrownFlag = 'name' | 'message' | 'cause' | 'code' | 'retryable' | 'dailyLimit' | 'signInExpired' | 'protocolShapeChanged' | 'retryAfterSeconds' | 'status' | 'upstreamKind'
+
+/** The provider-registration verdict, in the shape the browser may see: a failure is
+ * recorded rather than thrown (docs/issues/20-llm-handoff-detached.md), so it must be published
+ * or it is invisible; only `name` is published, never `message` (a thrown value can carry a
+ * credential-bearing URL), and `errorName` is never empty.
+ * @param error - the recorded registration error, or `undefined` on success.
+ * @returns `{ ok: true }`, or `{ ok: false, errorName }` with a non-empty name. */
+export function providerRegistrationState(
+  error: unknown,
+): { ok: true } | { ok: false; errorName: string } {
+  if (error === undefined) return { ok: true }
+  const name = thrownFlag(error, 'name')
+  return { ok: false, errorName: typeof name === 'string' && name !== '' ? name : 'Error' }
+}
+
+/**
+ * A refusal that means the sign-in is gone, so the cached credential is stale.
+ *
+ * The upstream layer used to build this as `const error: any = new Error(msg)`
+ * and then hang `signInExpired = true` on it. That worked, and the flag is
+ * genuinely what {@link isStaleCredentialError} reads — but declaring the local
+ * `any` meant the assignment itself was never checked, and the two throw sites
+ * had to agree by hand with a reader in another file.
+ *
+ * The property is declared here rather than inferred, so the two sites and the
+ * reader are tied together by the compiler.
+ */
+export class SignInExpiredError extends Error {
+  /** Read by {@link isStaleCredentialError}. Always true (see class doc). */
+  signInExpired: boolean
+
+  /**
+   * @param message - the readable sentence; built by the caller, which knows
+   *   which of the two failure shapes produced it.
+   */
+  constructor(message: string) {
+    super(message)
+    this.signInExpired = true
+  }
+}
+
+/**
  * Read a Qoder error frame and decide what it actually is.
  *
  * Codes that arrive here have very different meanings, and conflating them sent
@@ -97,7 +209,20 @@ function classifyUpstreamError(
   // the queue-marker fallback below would otherwise read it as a queue and the
   // plugin would burn a two-minute budget waiting for something that resets at
   // the day boundary and is not improved by waiting at all.
-  if (normalized === '110' || /billing daily count|daily count exceeded|daily limit/i.test(text)) {
+  //
+  // The code is matched explicitly: upstream used to send the numeric `110`
+  // (with a "Billing daily count exceeded" prose), then switched to the string
+  // `daily_limit_exceeded` whose prose ("daily request allowance … is used up")
+  // does NOT contain any of the substrings the regex below looks for. A branch
+  // that only matched the old prose would let the new code fall through to
+  // `kind:'upstream'` — losing both the friendlier message AND the
+  // `retryable:false` guarantee, so the harness would retry a request that
+  // resets only at the day boundary.
+  if (
+    normalized === '110' ||
+    normalized === 'daily_limit_exceeded' ||
+    /billing daily count|daily count exceeded|daily limit|daily request allowance/i.test(text)
+  ) {
     // The hint IS carried through, even though the kind is not a queue. It is
     // the only thing the UI can turn into "resets at HH:MM", and discarding it
     // is what left the user with a bare "重试延迟" and nothing to plan around.
@@ -116,6 +241,102 @@ function classifyUpstreamError(
     return { kind: 'rate-limit', retryAfterSeconds: queueSeconds(text) }
   }
   return { kind: 'upstream' }
+}
+
+/** The verdict for a non-2xx reply from a one-shot JSON endpoint (see {@link classifyHttpRefusal}). */
+export interface HttpRefusal {
+  /** Which of the four known failures this reply is. */
+  kind: 'daily-limit' | 'rate-limit' | 'sign-in-expired' | 'upstream'
+  /** Seconds the BODY claims to wait (a `Retry-After` header is the caller's to prefer), or 0. */
+  retryAfterSeconds: number
+}
+
+/** The verdict for one non-2xx reply from a one-shot JSON endpoint. The body is
+ * classified FIRST, as docs/issues/23-upstream-429-daily-limit.md settled for the stream:
+ * a `daily_limit_exceeded` on a 429 is a spent allowance, not a rate limit, so the
+ * status is read only when the body says nothing; 403 is NOT a sign-in rejection
+ * (the campaigns endpoint is machine-identity gated), so only 401 means the sign-in is gone.
+ * @param status - the HTTP status of the reply.
+ * @param bodyText - the reply body as text, possibly empty or not JSON.
+ * @returns the verdict, plus any wait the BODY stated. */
+export function classifyHttpRefusal(status: number, bodyText: string): HttpRefusal {
+  // Purity is the point of this module: no imports, so both the shim and the
+  // one-shot readers can reach the same rules and a test can feed them directly.
+  const classified = classifyUpstreamError({}, httpFailureCode(bodyText), bodyText)
+  if (classified.kind === 'daily-limit' || classified.kind === 'rate-limit' || classified.kind === 'sign-in-expired') {
+    return { kind: classified.kind, retryAfterSeconds: classified.retryAfterSeconds ?? 0 }
+  }
+  // No code and no prose: the status is all there is. 429 is a rate limit by
+  // definition here — a daily-limit 429 would have carried its code and been
+  // caught above, which is the whole ordering argument of docs/issues/23.
+  if (status === 429) return { kind: 'rate-limit', retryAfterSeconds: 0 }
+  if (status === 401) return { kind: 'sign-in-expired', retryAfterSeconds: 0 }
+  return { kind: 'upstream', retryAfterSeconds: 0 }
+}
+
+/**
+ * Pull a failure code out of a non-stream HTTP body, leniently.
+ *
+ * The gateways have answered with the code in any of four places — top-level
+ * `code`, `errorCode`, `type` (which is where the new daily-limit 429 puts it),
+ * or nested under an OpenAI-shaped `error` object — and with the code as either
+ * a string or a number. A wrong guess here is not cosmetic: it is the difference
+ * between "your allowance is spent" and the harness retrying a request that
+ * resets at the day boundary. A body that is not JSON at all (an HTML SSO page,
+ * an empty 502) answers `''`, which leaves the status to speak.
+ */
+function httpFailureCode(bodyText: string): string {
+  try {
+    const parsed: unknown = JSON.parse(bodyText)
+    if (parsed === null || typeof parsed !== 'object') return ''
+    const record = parsed as Record<string, unknown>
+    const nested = record.error
+    const nestedRecord =
+      nested !== null && typeof nested === 'object' ? (nested as Record<string, unknown>) : undefined
+    const candidates = [record.code, record.errorCode, record.type, nestedRecord?.code]
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate !== '') return candidate
+      if (typeof candidate === 'number' && Number.isFinite(candidate)) return String(candidate)
+    }
+    return ''
+  } catch {
+    // A non-JSON body is the common case for a gateway error page, not a bug.
+    return ''
+  }
+}
+
+/**
+ * Read a `Retry-After` hint as seconds, from either spelling the gateway uses.
+ *
+ * The header (and the JSON `retryAfterSeconds` field the frame path carries)
+ * reach this as an `unknown`: it has been a bare number, a numeric string, and
+ * an HTTP-date string ("Wed, 21 Oct 2026 07:28:00 GMT") across builds. The delta
+ * form is the wait itself; the date form is resolved against the wall clock, so
+ * a stale absolute deadline reads as `0` rather than a negative number that a
+ * caller would then have to clamp again.
+ *
+ * It is a pure function with no imports so the throttle gate (see
+ * `credential-cache.ts`) can honour a platform-stated window without inventing
+ * one — and so a test can feed it each real spelling.
+ *
+ * @param value - the header or field value, still `unknown`.
+ * @param now - the wall clock the date form is measured against; defaults to now.
+ * @returns whole seconds to wait (never negative), or `undefined` when the value
+ *   names no window at all. `undefined` and `0` differ: the first means "the
+ *   platform said nothing" and a caller falls back to its own backoff; the second
+ *   means "it said wait zero", which is already open.
+ */
+export function parseRetryAfterSeconds(value: unknown, now: number = Date.now()): number | undefined {
+  if (value === undefined || value === null) return undefined
+  // A number or a numeric string is a delta in seconds, the common case.
+  const asNumber = Number(value)
+  if (Number.isFinite(asNumber)) return Math.max(0, Math.round(asNumber))
+  // Anything else that is a string may be an HTTP-date (RFC 9110 §15.5.1).
+  if (typeof value === 'string') {
+    const at = Date.parse(value)
+    if (Number.isFinite(at)) return Math.max(0, Math.ceil((at - now) / 1000))
+  }
+  return undefined
 }
 
 /**
@@ -201,6 +422,102 @@ export class ProtocolShapeChangedError extends Error {
  */
 export function isProtocolShapeChangedError(error: unknown): boolean {
   return (error as { protocolShapeChanged?: unknown } | null | undefined)?.protocolShapeChanged === true
+}
+
+/** A refusal from a one-shot OpenAPI read (docs/issues/24-terminal-failure-status-codes.md),
+ * carrying the verdict the stream path already computes. The message is byte-identical to
+ * the plain `Error` it replaces, so the classification rides in flags, not in the wording;
+ * the flags are fields, not the class name, so a prototype-less value still reads
+ * through `thrownFlag`; no `retryable: false`: no queue ladder runs here, so an absent
+ * flag already answers "do not wait". */
+export class UpstreamRefusalError extends Error {
+  /** The HTTP status of the reply, kept for callers that want to re-derive a verdict. */
+  status: number
+  /** The verdict from {@link classifyHttpRefusal}. */
+  upstreamKind: HttpRefusal['kind']
+  /** Seconds to wait: the `Retry-After` header when it stated one, else the body's own. */
+  retryAfterSeconds: number
+  /** True when the verdict is a spent daily allowance — the local exhausted badge's signal. */
+  dailyLimit: boolean
+  /** True when the verdict is a sign-in rejection — the credential's invalidation signal. */
+  signInExpired: boolean
+
+  /**
+   * @param message - the user-visible message, unchanged from the plain `Error`.
+   * @param status - the HTTP status of the reply.
+   * @param bodyText - the reply body as text, for classification.
+   * @param retryAfterHeader - the `Retry-After` header, still `unknown` as it
+   *   arrives from the fetch layer; it wins over the body's own field because
+   *   the header is what HTTP promises and the field is a courtesy the gateway
+   *   only sometimes includes (the same precedence the exchange throttle uses).
+   */
+  constructor(message: string, status: number, bodyText: string, retryAfterHeader?: unknown) {
+    super(message)
+    this.name = 'UpstreamRefusalError'
+    const verdict = classifyHttpRefusal(status, bodyText)
+    this.status = status
+    this.upstreamKind = verdict.kind
+    this.retryAfterSeconds = parseRetryAfterSeconds(retryAfterHeader) ?? verdict.retryAfterSeconds
+    this.dailyLimit = verdict.kind === 'daily-limit'
+    this.signInExpired = verdict.kind === 'sign-in-expired'
+  }
+}
+
+/**
+ * Strip credential-shaped substrings out of text that is about to be shown or
+ * logged.
+ *
+ * Why this exists, in the plugin's own terms: the threat model in
+ * `src/host/handlers.ts` says a credential only ever travels in an
+ * `Authorization` header and never inside a URL, so a credential should not be
+ * able to reach a log — and the comment there carries its own tripwire ("if
+ * some call site ever moves a secret into a URL, this comment is the alarm").
+ * But the bytes that DO reach a log are the upstream's: an error body is copied
+ * into a message verbatim in a dozen places, and a gateway or proxy that echoes
+ * the request headers back (they do) carries the `Authorization` value
+ * straight into the panel and into `$DSH_HOME/logs`. The rule that keeps a
+ * credential out of a URL does not keep it out of an echo.
+ *
+ * So this is defence in depth rather than a repair of a known leak, and it is
+ * deliberately conservative: prose like "the token is expired" is left alone,
+ * because a redaction that eats ordinary words costs more diagnostics than it
+ * buys. What it matches is the SHAPE a credential takes — a header name, a
+ * `Bearer`/`Basic` prefix, a JWT, an `sk-`-style prefix, a named secret in a
+ * key/value or JSON shape.
+ *
+ * It is pure and import-free, so a test can feed it the exact strings an
+ * upstream might send and assert on the result — the same reason the rest of
+ * this module has no imports.
+ *
+ * @param text - the text to scrub.
+ * @returns the same text with credential-shaped substrings replaced.
+ */
+export function redactSecrets(text: string): string {
+  return text
+    // A credential with its scheme. This comes FIRST because the scheme and
+    // the credential are one unit: a rule that matched only the header name
+    // would replace the word `Bearer` and leave the credential standing next
+    // to it.
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/g, '$1 [REDACTED]')
+    // A header echoed back by a gateway: `Authorization: Bearer …`. The value
+    // is taken to the end of the line (a quote ends it, so a JSON body keeps
+    // its other fields) — a header-shaped line is redacted whole, because a
+    // value cut in half can match no shape rule.
+    .replace(/(\b(?:proxy-)?authorization\s*[:=]\s*)([^\r\n"']+)/gi, '$1[REDACTED]')
+    // A cookie jar, echoed whole.
+    .replace(/\b((?:set-)?cookie\s*:\s*)[^\r\n]+/gi, '$1[REDACTED]')
+    // A JWT with no key name in front of it — the shape a token takes when the
+    // upstream names it in prose ("token eyJhbGciOi…").
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g, '[REDACTED]')
+    // The `sk-` / `cpk-` prefixes the Qoder-family plugins use.
+    .replace(/\b(?:sk|cpk)-[A-Za-z0-9._-]{8,}/g, '[REDACTED]')
+    // A named secret in a key/value or JSON shape. The key list is closed, so
+    // an unknown field name is not covered by this rule — the shape rules above
+    // are what cover those.
+    .replace(
+      /("?(?:access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|apikey|client[_-]?secret|token|secret|password)"?\s*[:=]\s*)("?)[^"'\s,}&;]+("?)/gi,
+      '$1$2[REDACTED]$3',
+    )
 }
 
 export { classifyUpstreamError }

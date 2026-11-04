@@ -14,6 +14,8 @@
  * the atomicity claim is checked here on whichever platform CI runs, not
  * assumed in a comment.
  */
+// @ts-check
+
 import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, chmodSync, mkdirSync } from 'node:fs'
@@ -22,6 +24,7 @@ import { join } from 'node:path'
 
 import { CatalogStore, CATALOG_FORMAT_VERSION } from '../src/host/catalog-store.ts'
 
+/** @type {string[]} */
 const created = []
 
 /** A fresh temporary directory, removed after the test. */
@@ -34,6 +37,7 @@ function tempDir() {
 afterEach(() => {
   while (created.length > 0) {
     const dir = created.pop()
+    if (dir === undefined) break
     try {
       chmodSync(dir, 0o700)
     } catch {
@@ -83,7 +87,7 @@ test('saving twice replaces the file rather than appending or failing', () => {
 
   const reloaded = new CatalogStore({ path })
   assert.strictEqual(reloaded.current().length, 1, 'the second save must replace the first')
-  assert.strictEqual(reloaded.current()[0].id, 'Only')
+  assert.strictEqual(reloaded.current()[0]?.id, 'Only')
   assert.strictEqual(existsSync(`${path}.tmp`), false)
 })
 

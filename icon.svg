@@ -1,0 +1,47 @@
+<svg width="128" height="128" viewBox="-14 -14 314 321" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!--
+    Qoder mark, traced from upstream/qoder-icon.png (the "Qoder CN" brand lockup,
+    glyph portion). Structure: an outer rounded silhouette (big left arc, sloped
+    top-right edge, straight right side, pointed bottom with a small notch foot
+    at the lower-right) plus an inner "lens" whose apex touches the sloped edge
+    and whose left stroke runs down into the bottom-left arc.
+    Ink is near-black on light themes and near-white on dark themes (the card
+    tile is dark), matching how the sibling plugin icons stay readable both ways.
+  -->
+  <style>
+    .ink { stroke: #171717; }
+    @media (prefers-color-scheme: dark) { .ink { stroke: #f2f2f2; } }
+  </style>
+  <g class="ink" stroke-width="23" stroke-linecap="round" stroke-linejoin="round">
+    <!-- outer silhouette, clockwise from top apex -->
+    <path d="M113 3
+             C 88 9, 58 24, 43 44
+             C 30 61, 18 81, 12 103
+             C 8 119, 7 136, 9 153
+             C 11 171, 13 186, 19 199
+             C 29 217, 46 233, 67 247
+             C 96 266, 131 284, 166 291
+             C 172 292, 176 289, 179 284
+             C 186 276, 198 272, 212 273
+             L 226 274
+             C 230 268, 234 262, 238 262
+             C 242 262, 244 268, 246 274
+             C 252 279, 262 280, 268 277
+             C 272 275, 274 271, 274 264
+             L 274 102
+             C 274 84, 266 70, 247 63
+             C 205 40, 150 14, 113 3
+             Z" />
+    <!-- lens: left stroke (apex fused into the sloped edge, bulging left, running down into the bottom-left arc) -->
+    <path d="M166 54
+             C 150 74, 134 96, 127 118
+             C 120 138, 115 160, 113 182
+             C 112 200, 114 218, 117 232
+             C 119 240, 121 244, 122 247" />
+    <!-- lens: right stroke (same apex, near-vertical then hooking left to a tip inside the lens) -->
+    <path d="M166 54
+             C 169 75, 170 95, 169 117
+             C 167 140, 162 160, 154 178
+             C 148 190, 141 197, 134 200" />
+  </g>
+</svg>

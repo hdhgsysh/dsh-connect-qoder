@@ -1,0 +1,48 @@
+{
+  "$comment": "The ratchet ledger: every number that gates this repository, and the record of how it got there. The gates read their number from here — a value this ledger does not account for is refused, so moving a threshold is a recorded act (from, to, date, reason) that shows up in a diff, not a quiet edit of a constant. The rules live in scripts/ratchet-ledger.mjs; the gates that read it are scripts/audit-test-types.mjs, scripts/audit-test-type-errors.mjs, scripts/audit-implicit-any.mjs and scripts/audit-explicit-any.mjs.",
+  "ratchets": {
+    "testOptInFloor": {
+      "value": 13,
+      "baseline": {
+        "from": 13,
+        "on": "2026-10-21",
+        "reason": "baseline — the number of test files that carry // @ts-check today; the floor may only rise unless a change says otherwise"
+      },
+      "changes": []
+    },
+    "testTypeErrorBudget": {
+      "value": 2016,
+      "baseline": {
+        "from": 2018,
+        "on": "2026-10-21",
+        "reason": "baseline — the test tree's type-error debt, measured with checkJs on (tsconfig.test.budget.json)"
+      },
+      "changes": [
+        {
+          "from": 2018,
+          "to": 2016,
+          "on": "2026-10-21",
+          "reason": "docs-facts.test.js 的「README 图片」门禁重写（改成「图片总数 > 0 + 本地图必须在检出里 + assets/ 不在 files 时禁止相对路径」，因为旧断言恰好把 npm 页面上那张裂图保了下来）顺带消掉 2 个类型错误；实测 2016，按「只降不升」把天花板一起降下来"
+        }
+      ]
+    },
+    "implicitAnyBudget": {
+      "value": 0,
+      "baseline": {
+        "from": 0,
+        "on": "2026-10-21",
+        "reason": "baseline — the debt was cleared; any new implicit any is a new site, not a tolerated one"
+      },
+      "changes": []
+    },
+    "explicitAnyBudget": {
+      "value": 0,
+      "baseline": {
+        "from": 0,
+        "on": "2026-10-21",
+        "reason": "baseline — the debt was cleared; any new explicit any is a new site, not a tolerated one"
+      },
+      "changes": []
+    }
+  }
+}

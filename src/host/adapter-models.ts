@@ -2,22 +2,12 @@
  * The model list one region offers DSH — the decisions inside the adapter,
  * without the adapter.
  *
- * WHY THIS IS A MODULE
- *
  * `createQoderAdapter` (lib/adapter.js) cannot be imported by a test: it pulls
  * in `@earendil-works/pi-ai` and `@deepseek-ai/dsh-llm-pi-ai`, which this
- * repository does not install. So the whole file was outside the coverage
- * denominator (docs/issues/11), and the model list — which is where every user-
- * visible curation decision happens — was among the untested parts: the per-
- * region switch, the allow-list filter, the maximum-context preference and the
- * per-model image mode.
- *
- * All four are pure functions of their arguments, and all four have a failure
- * mode that is silent: a switch that stops switching hides a provider with no
- * error, a filter that stops filtering offers models the user unticked, a
- * context preference that is ignored is invisible until someone compares the
- * card with the picker.
- *
+ * repository does not install, so the file sat outside the coverage denominator
+ * (docs/issues/11-coverage-denominator.md) — and the model list, where every
+ * user-visible curation decision happens, with it. The four decisions are pure,
+ * and each fails silently: a switch that stops switching hides a provider.
  * @module dsh-connect-qoder/adapter-models
  */
 import { filterByEnabled } from './catalog-entry.ts'
@@ -79,6 +69,12 @@ export function buildModelsFor(runtime: ModelRuntime, options: BuildModelsOption
   // value reads as off, because this switch decides whether a provider is
   // offered at all and a default-on here would publish a region the user
   // turned off.
+  //
+  // Do NOT "unify" this with `adapter.ts`'s `options.regionEnabled ?? (() => true)`,
+  // which defaults the opposite way. That one answers "what if the wiring forgot
+  // the switch?" (adapt the regions the caller already chose), and this one
+  // answers "may this region be offered?" (no, unless stated). Both directions
+  // are pinned by `test/region-enabled-defaults.test.js`.
   if (options.regionEnabled !== true) return []
   const catalog = typeof runtime.catalog === 'function' ? runtime.catalog() : runtime.catalog.current()
   return filterByEnabled(catalog, options.enabledIds).map((entry) =>

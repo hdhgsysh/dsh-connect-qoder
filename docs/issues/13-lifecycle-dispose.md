@@ -38,7 +38,7 @@ dispose 之后再 POST `account/reload` 会**再起一个 shim + 一个 interval
 不只是"事后不认这个结果"，而是**真的掐断上游连接**。两层都要，因为二者会竞态：
 abort 可能输给一个已经读到的响应。
 
-`isRefreshObsolete`（[`../../lib/catalog-refresh.js`](../../lib/catalog-refresh.js)）是纯函数，
+`isRefreshObsolete`（[`../../src/host/catalog-refresh.ts`](../../src/host/catalog-refresh.ts)）是纯函数，
 **成功路径和失败路径都要查**：只查一条是最容易犯的"改一半"——成功路径不查会往磁盘写目录并向
 已释放的 fiber `emit`；失败路径不查会在每次禁用/热重载的日志里留下一条无主的警告。
 测试用源码断言数检查点个数（`lib/index.js` 不可 import），变异验证删掉失败路径那条即红。
@@ -51,7 +51,7 @@ abort 可能输给一个已经读到的响应。
 `app.asar.unpacked` 里没有该包、`@deepseek-ai` 下只有 `cosmokit` 与 `schemastery`。
 
 于是改成一个**两种宿主语义下都正确**的写法：把 `register()` 的返回值收集起来，
-**只有当它是可调用的**才在 dispose 时调用（[`../../lib/lifecycle.js`](../../lib/lifecycle.js)）。
+**只有当它是可调用的**才在 dispose 时调用（[`../../src/host/lifecycle.ts`](../../src/host/lifecycle.ts)）。
 随 fiber 回收的宿主会忽略这次多余调用；不随 fiber 回收的宿主则拿到了它原本缺失的注销。
 
 这样处理的关键是**不对看不见的契约下断言**。若宿主将来改变返回值的形状，退化结果是
@@ -63,3 +63,12 @@ abort 可能输给一个已经读到的响应。
 **七处 `register` 全部包装**（原 issue 记的是 6 处，现已 7 处），并由
 `test/lifecycle.test.js` 逐处断言——新增路由漏包装会当场变红（变异验证过）。释放时单个抛错
 不影响其余（那些才持有端口），且 dispose 永不抛异常。
+
+## 后续：provider 注册的回滚也已抽出（PLAN P2-1 第二轮）
+
+本 issue 收的是**路由**注册的注销；重载时**重新发布 provider** 的那条路径原本也有回滚，
+同样没测——它是 `activate()` 里的内联闭包，包着十一个可变绑定，只有
+`test/account-route-wiring.test.js` 一条正则确认零区域早退还在。现按 `handlers.ts` 同一
+手法抽进 `src/host/publish-regions.ts`（`test/publish-regions.test.js` 13 例），回滚的每个
+终态都可执行断言。抽取过程查出两个真 bug 并已修：半注册的 adapter 残留无人能释放；
+回滚中途再次失败会丢弃刚注册成功的 adapter 的句柄。见 PLAN §P2-1。

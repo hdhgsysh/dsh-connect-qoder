@@ -16,3 +16,18 @@ export const QODER_ACCOUNT_CONFIRM_PATH = "/plugins/dsh-connect-qoder/account/co
  * day-old round can never be claimed from a stale render.
  */
 export const QODER_CHECKIN_PATH = "/plugins/dsh-connect-qoder/checkin";
+/**
+ * Plugin-owned write route: begin this plugin's own device sign-in.
+ *
+ * Answers with the URL the user approves in a browser. The four routes are one
+ * feature — the host mounts them as a group, all or none — so the card must
+ * treat a failure to reach any of them the same way: say so, do not pretend the
+ * button worked.
+ */
+export const QODER_DEVICE_LOGIN_START_PATH = "/plugins/dsh-connect-qoder/device-login/start";
+/** Plugin-owned read route: one poll of a pending device sign-in. */
+export const QODER_DEVICE_LOGIN_POLL_PATH = "/plugins/dsh-connect-qoder/device-login/poll";
+/** Plugin-owned write route: abandon a pending device sign-in. */
+export const QODER_DEVICE_LOGIN_CANCEL_PATH = "/plugins/dsh-connect-qoder/device-login/cancel";
+/** Plugin-owned write route: delete the plugin's own stored token for a region. */
+export const QODER_DEVICE_LOGIN_SIGNOUT_PATH = "/plugins/dsh-connect-qoder/device-login/signout";
