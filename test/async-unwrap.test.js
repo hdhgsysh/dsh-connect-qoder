@@ -33,7 +33,7 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, readdirSync,
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { loadCredentialAsync, loadCredential, setCredentialDiagnosticSink, describeUnwrapFailure, appDataRootFor } from '../lib/credentials.js'
+import { loadCredentialAsync, loadCredential, setCredentialDiagnosticSink, describeUnwrapFailure, appDataRootFor } from '../src/host/credentials.ts'
 
 const REGION = {
   id: 'qoder-cn',
@@ -42,6 +42,7 @@ const REGION = {
   newAppNames: ['com.qodercn.app.stable'],
   patEnvNames: ['QODERCN_PAT'],
   manageUrl: 'https://qoder.com.cn',
+  downloadUrl: 'https://qoder.com.cn/download',
 }
 
 /** A 32-byte master key, base64'd the way the DPAPI hand-off writes it. */
@@ -283,20 +284,26 @@ test('both paths share one implementation, and differ only in the child spawn', 
   // on states reachable without a real PowerShell. What must not be possible is
   // for one path to grow its own copy of the temp-directory, zeroing or
   // failure-recording logic — that is how the two would drift, silently.
-  const source = readFileSync(new URL('../lib/credentials.js', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('../src/host/credentials.ts', import.meta.url), 'utf8')
   assert.equal(
     (source.match(/function runUnwrap\(/g) ?? []).length,
     1,
     'there must be exactly one unwrap body, parameterised by the spawner',
   )
+  // The two patterns below deliberately do not pin the parameter lists or the
+  // return annotations: this assertion is about WHICH shared body each entry
+  // delegates to, and pinning the spelling made a pure type annotation
+  // (`options` → `options: UnwrapOptions`, plus a stated return type) look like
+  // the delegation had been removed. The spawner each entry passes — the thing
+  // the test is actually about — is still pinned exactly.
   assert.match(
     source,
-    /export function oscryptKeyFor\(appDir, options = \{\}\) \{\s*return runUnwrap\(appDir, options, spawnUnwrapSync\)/,
+    /export function oscryptKeyFor\([^)]*\)[^{]*\{[\s\S]*?return runUnwrap\(appDir, options, spawnUnwrapSync\)/,
     'the sync entry must delegate to the shared body',
   )
   assert.match(
     source,
-    /export async function oscryptKeyForAsync\(appDir, options = \{\}\) \{\s*return runUnwrap\(appDir, options, spawnUnwrapAsync\)/,
+    /export async function oscryptKeyForAsync\([^)]*\)[^{]*\{[\s\S]*?return runUnwrap\(appDir, options, spawnUnwrapAsync\)/,
     'the async entry must delegate to the SAME body',
   )
   // `execFileSync` must not survive anywhere on the async path.

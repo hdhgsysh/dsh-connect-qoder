@@ -1,6 +1,34 @@
-import { installStyles } from "./styles"
-import { zh, en } from "./copy"
-import { QoderPluginCard } from "./card"
+import { installStyles } from "./styles.ts"
+import { zh, en } from "./copy.ts"
+import { QoderPluginCard } from "./card.ts"
+import type { SettingsScope } from "./settings-write.ts"
+
+/**
+ * The browser plugin's Cordis context, from the members this file touches.
+ *
+ * Declared structurally for the same reason `HostContext` is (`domain.ts`):
+ * Cordis is a peer the checkout has no types for, and a hand-written imitation
+ * of its real `Context` would be worse than `unknown` because it could not
+ * admit what it does not know. Everything below is either present in the
+ * `inject` list above or probed with `ctx.get`, so nothing here is speculative.
+ *
+ * `get` answers `unknown` on purpose: it is the soft service locator this file
+ * uses to span the 0.1.6/0.1.7 settings split, and each result is narrowed at
+ * the point of use rather than trusted by name.
+ */
+interface ClientContext {
+	effect(callback: () => unknown, name?: string): unknown
+	locale: {
+		register(namespace: string, copy: { zh: unknown; en: unknown }): unknown
+		bind(namespace: string): (key: string) => string
+	}
+	slots: {
+		inject(slotName: string, callback: () => unknown): unknown
+		register(slot: Record<string, unknown>, card: unknown): unknown
+	}
+	get(name: string): any
+}
+
 /** Stable browser-plugin name. */
 const name = "dsh-connect-qoder-client";
 /**
@@ -28,15 +56,9 @@ const inject = ["slots", "locale"];
  * rendered, because the card list is built from the Host's installed
  * sections.
  */
-function apply(ctx) {
+function apply(ctx: ClientContext) {
 	try {
 		installStyles();
-		const namespace = "settings.qoder";
-		ctx.effect(() => ctx.locale.register(namespace, {
-			zh,
-			en
-		}), "dsh-connect-qoder: settings copy");
-	const t = ctx.locale.bind(namespace);
 	/**
 	 * FIX 0.1.7: probe the settings surface without a hard dependency.
 	 * 0.1.7 serves the section through `configForms`; 0.1.6 and earlier
@@ -45,20 +67,52 @@ function apply(ctx) {
 	 * mirrors the legacy `settingsScope.bind` shape (`.set` / `.getSnapshot`),
 	 * so the card body below is unchanged.
 	 */
-	const softGet = (name) => ctx.get(name);
-	let settingsScope;
+	const softGet = (name: string): any => ctx.get(name);
+	/**
+	 * The namespace the HOST actually serves this plugin's settings under.
+	 *
+	 * Read from the live `describe()` view rather than trusted from a constant,
+	 * because a plugin no longer picks its own namespace: on 0.1.7 the service
+	 * derives it from the Loader entry (`ns: entry.options.id`, which is the
+	 * provider name `llm-qoder`), and on 0.1.6 and earlier it is the plugin
+	 * namespace. The host half already resolves this the same way in
+	 * `settingsNamespaceOf` — and reads it live for the same reason.
+	 *
+	 * This value drives BOTH the locale table and the settings scope, and that
+	 * is the point: they must name one namespace, or the copy and the section
+	 * the user is looking at belong to different identities. An earlier version
+	 * hardcoded `"settings.qoder"` here — a namespace the host has never
+	 * served — so `locale.bind` found no table, every lookup fell back to
+	 * echoing its own key, and the card rendered as raw `account.reload`-style
+	 * identifiers in BOTH languages. The fault was misread as "no English
+	 * translation" for a while, because a key-echo looks the same as a missing
+	 * translation whichever locale is active.
+	 */
+	const resolveNamespace = (): string => {
+		const fallback = "dsh-connect-qoder";
+		const forms = softGet("configForms");
+		if (forms === void 0) return fallback;
+		try {
+			const served = (forms.describe().getSnapshot().view?.namespaces ?? [])
+				.find((entry: { ns: string }) => entry.ns === fallback || /qoder/i.test(entry.ns));
+			return served !== void 0 ? served.ns : fallback;
+		} catch {
+			return fallback;
+		}
+	};
+	const namespace = resolveNamespace();
+	ctx.effect(() => ctx.locale.register(namespace, {
+		zh,
+		en
+	}), "dsh-connect-qoder: settings copy");
+	const t = ctx.locale.bind(namespace);
+	let settingsScope: SettingsScope | undefined;
 	const forms = softGet("configForms");
 	const legacy = softGet("settingsScope");
 	if (forms !== void 0) {
-		let ns = "dsh-connect-qoder";
-		try {
-			const served = (forms.describe().getSnapshot().view?.namespaces ?? [])
-				.find((entry) => entry.ns === "dsh-connect-qoder" || /qoder/i.test(entry.ns));
-			if (served !== void 0) ns = served.ns;
-		} catch {}
-		settingsScope = forms.get(ns);
+		settingsScope = forms.get(namespace) as SettingsScope;
 	} else if (legacy !== void 0) {
-		settingsScope = legacy.bind({ namespace: "dsh-connect-qoder" });
+		settingsScope = legacy.bind({ namespace }) as SettingsScope;
 	}
 	/**
 	 * FIX 0.1.7: the plugin-manager detail page renders a bundle's config
@@ -75,7 +129,7 @@ function apply(ctx) {
 	 * read-only card when no settings surface is served, instead of
 	 * throwing into the loader.
 	 */
-	const registerCard = (slotName, key) => {
+	const registerCard = (slotName: string, key: string) => {
 		try {
 			ctx.slots.inject(slotName, () => ctx.slots.register({
 				name: slotName,
@@ -88,7 +142,7 @@ function apply(ctx) {
 					settingsScope
 				}
 			}, QoderPluginCard));
-		} catch (error) {
+		} catch (error: any) {
 			console.error(`[dsh-connect-qoder] card slot "${slotName}" failed to register (host provider unaffected):`, error);
 		}
 	};
@@ -97,7 +151,7 @@ function apply(ctx) {
 		registerCard("plugins.row.config", `${bundle}#llm-qoder`);
 	}
 	registerCard("settings.plugin.item", "qoder");
-	} catch (error) {
+	} catch (error: any) {
 		console.error("[dsh-connect-qoder] client card failed to load (host provider unaffected):", error);
 	}
 }

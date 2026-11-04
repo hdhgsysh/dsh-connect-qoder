@@ -1,8 +1,143 @@
 
 import * as react from "react"
 import * as react_jsx_runtime from "react/jsx-runtime"
-import { QODER_MODELS_PATH, QODER_USAGE_PATH, QODER_ACCOUNT_PATH, QODER_ACCOUNT_RELOAD_PATH, QODER_ACCOUNT_CONFIRM_PATH, QODER_CHECKIN_PATH } from "./paths"
-import { writeSettingsField } from "./settings-write"
+import { QODER_MODELS_PATH, QODER_USAGE_PATH, QODER_ACCOUNT_PATH, QODER_ACCOUNT_RELOAD_PATH, QODER_ACCOUNT_CONFIRM_PATH, QODER_CHECKIN_PATH } from "./paths.ts"
+import { writeSettingsField } from "./settings-write.ts"
+import type { SettingsScope } from "./settings-write.ts"
+
+/**
+ * The client half's type vocabulary.
+ *
+ * Declared HERE rather than imported from `src/host/domain.ts`, and that is a
+ * deliberate boundary rather than laziness: the two halves are separate bundles
+ * that meet over HTTP. The card reads whatever the route ANSWERED, which is a
+ * *projected* row the host built for display — not the host's internal
+ * `CatalogEntry`. Importing the host's type would assert a coupling that does
+ * not exist (a host-side field rename would silently retype the card) and would
+ * pull the host module graph into the browser bundle's type graph for no gain.
+ *
+ * So these describe what the card actually consumes, and every field the card
+ * reads is optional: the route is a different process, and a field the host
+ * stopped sending must degrade to the fallback the card already has rather than
+ * become a lie the types endorse.
+ */
+
+/** One model row as the models route serves it. */
+interface CardModelRow {
+	id: string
+	region?: string
+	name?: string
+	contextWindowLabel?: string
+	contextOptions?: unknown[]
+	defaultContextWindow?: number
+	priceFactor?: number
+	/** Normalized by `upstream.normalizePromotion`; see `Promotion` in domain.ts. */
+	promotion?: CardPromotion | null
+	[key: string]: unknown
+}
+
+/** The time-of-day discount block, as the card reads it. */
+interface CardPromotion {
+	active?: boolean
+	windowStart?: string
+	windowEnd?: string
+	beforePromotionPriceFactor?: number
+	discountFactor?: number
+	[key: string]: unknown
+}
+
+/** A per-region usage block on the usage route's answer. */
+interface CardUsageRegion {
+	region?: string
+	regionName?: string
+	displayName?: string
+	available?: boolean
+	expiresAt?: number
+	userQuota?: CardQuota
+	addOnQuota?: CardQuota
+	dedicatedPackages?: CardQuota[]
+	campaigns?: CardCampaign[]
+	checkin?: CardCheckin
+	[key: string]: unknown
+}
+
+/** One quota bucket, in either the base or the add-on slot. */
+interface CardQuota {
+	used?: number
+	total?: number
+	remaining?: number
+	[key: string]: unknown
+}
+
+/** One promotional campaign row. */
+interface CardCampaign {
+	id?: string
+	badge?: string
+	description?: string
+	[key: string]: unknown
+}
+
+/** The daily check-in block. */
+interface CardCheckin {
+	enabled?: boolean
+	claimed?: boolean
+	streak?: number
+	[key: string]: unknown
+}
+
+/** One account row as the account route serves it. */
+interface CardAccountEntry {
+	region?: string
+	regionName?: string
+	appName?: string
+	displayName?: string
+	state?: string
+	detail?: string
+	downloadUrl?: string
+	source?: string
+	/** The provider switch, as the route resolved it (absent = offered). */
+	enabled?: boolean
+	identity?: { name?: string; email?: string; expiresAt?: number } | null
+	[key: string]: unknown
+}
+
+/**
+ * The translation function the host injects.
+ *
+ * `t` reaches the card from the `locale.bind(namespace)` in `client/index.ts`.
+ * An unknown key answers the key itself rather than throwing, so the card must
+ * tolerate a missing translation — which is why this is not typed to a union of
+ * literal keys.
+ *
+ * The second parameter is the interpolation bag (`t("usage.checkinAvailable",
+ * { amount })`). Restricted to a record of `string | number` rather than
+ * `unknown`: these values are substituted into copy, and a message that pasted
+ * `[object Object]` on screen would be a real defect rather than a typing
+ * inconvenience.
+ */
+type TranslateFn = (key: string, params?: Record<string, string | number>) => string
+
+/**
+ * Browser event shapes the card's handlers actually read.
+ *
+ * Not `unknown`, and not the DOM's own `Event` either — the JSX shim declares
+ * `JSX.IntrinsicElements` only as an index signature, so there is no element
+ * type for `jsx()` to propagate into a handler. What the code needs is narrow
+ * and worth stating: a checkbox handler reads `target.checked`, a select or
+ * text input reads `target.value`. Naming the two separately means each call
+ * site says which one it is, and a `checked` read on a `value` handler is a
+ * compile error rather than `undefined` at runtime.
+ */
+interface CheckboxEvent {
+	target: { checked: boolean }
+}
+interface ValueEvent {
+	target: { value: string }
+}
+
+/** A browser event handler, as the JSX shim's `jsx()` sees it. */
+type EventHandler = (event: unknown) => void
+
 /** The three per-model image choices this card writes. */
 const IMAGE_MODES = ["auto", "on", "off"];
 
@@ -21,13 +156,13 @@ const IMAGE_MODES = ["auto", "on", "off"];
 const HIDE_ALL_MODELS = "__hide-all__";
 
 /** Normalise whatever the saved map holds into one of {@link IMAGE_MODES}. */
-function imageModeOf(overrides, modelId) {
-	const saved = overrides === null || typeof overrides !== "object" ? undefined : overrides[modelId];
-	return IMAGE_MODES.includes(saved) ? saved : "auto";
+function imageModeOf(overrides: unknown, modelId: string): string {
+	const saved = overrides === null || typeof overrides !== "object" ? undefined : (overrides as Record<string, unknown>)[modelId];
+	return typeof saved === "string" && IMAGE_MODES.includes(saved) ? saved : "auto";
 }
 
 /** Fill a `{date}` placeholder in a translated string. */
-function withDate(template, at) {
+function withDate(template: string, at: number | undefined): string {
 	if (typeof at !== "number" || !Number.isFinite(at) || at <= 0) return "";
 	const date = new Date(at).toLocaleDateString(undefined, { year: "numeric", month: "numeric", day: "numeric" });
 	return template.replace("{date}", date);
@@ -41,14 +176,14 @@ function withDate(template, at) {
  * shows nothing at all. This mirrors how the host decorates the picker
  * name, so the card and the picker never disagree.
  */
-function rateLabelOf(t, factor) {
+function rateLabelOf(t: TranslateFn, factor: unknown): string | undefined {
 	const value = Number(factor);
 	if (!Number.isFinite(value)) return undefined;
 	return value <= 0 ? t("row.rateFree") : `x${value.toFixed(2)}`;
 }
 
 /** Seconds past local midnight in `timezone`, or undefined when unusable. */
-function localSecondsOf(date, timezone) {
+function localSecondsOf(date: Date, timezone: string): number | undefined {
 	try {
 		const parts = new Intl.DateTimeFormat("en-US", {
 			timeZone: timezone,
@@ -57,7 +192,7 @@ function localSecondsOf(date, timezone) {
 			minute: "2-digit",
 			second: "2-digit"
 		}).formatToParts(date);
-		const read = (type) => Number(parts.find((part) => part.type === type)?.value ?? Number.NaN);
+		const read = (type: string) => Number(parts.find((part) => part.type === type)?.value ?? Number.NaN);
 		const hour = read("hour") % 24;
 		const minute = read("minute");
 		const second = read("second");
@@ -69,7 +204,7 @@ function localSecondsOf(date, timezone) {
 }
 
 /** Parse `HH:MM` into seconds past midnight, or undefined. */
-function parseClock(text) {
+function parseClock(text: unknown): number | undefined {
 	const match = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(String(text ?? "").trim());
 	if (match === null) return undefined;
 	const hour = Number(match[1]);
@@ -112,14 +247,14 @@ function parseClock(text) {
  * @returns `{ active, remainingSeconds }`, or undefined when the model
  *   carries no usable window or its promotion is not active.
  */
-function offPeakState(model, now) {
+function offPeakState(model: CardModelRow, now: Date): { active: boolean; remainingSeconds: number } | undefined {
 	const promo = model.promotion;
 	if (promo === null || typeof promo !== "object") return undefined;
 	if (promo.active !== true) return undefined;
 	const start = parseClock(promo.windowStart);
 	const end = parseClock(promo.windowEnd);
 	if (start === undefined || end === undefined || start === end) return undefined;
-	const seconds = localSecondsOf(now, promo.timezone ?? "Asia/Shanghai");
+	const seconds = localSecondsOf(now, typeof promo.timezone === "string" ? promo.timezone : "Asia/Shanghai");
 	if (seconds === undefined) return undefined;
 	const active = start < end ? seconds >= start && seconds < end : seconds >= start || seconds < end;
 	const target = active ? end : start;
@@ -128,9 +263,9 @@ function offPeakState(model, now) {
 }
 
 /** `HH:MM:SS` from a second count, matching the Qoder client's countdown. */
-function formatCountdown(seconds) {
+function formatCountdown(seconds: unknown): string {
 	const total = Math.max(0, Math.floor(Number(seconds) || 0));
-	const pad = (value) => String(value).padStart(2, "0");
+	const pad = (value: number) => String(value).padStart(2, "0");
 	return [Math.floor(total / 3600), Math.floor((total % 3600) / 60), total % 60].map(pad).join(":");
 }
 
@@ -138,7 +273,7 @@ function formatCountdown(seconds) {
  * A short label for a raw context-window token count, matching the
  * catalog's own naming (`1M` / `200K` / `128K`).
  */
-function formatContextWindowForUi(tokens) {
+function formatContextWindowForUi(tokens: unknown): string {
 	const n = Number(tokens)
 	if (!Number.isFinite(n) || n <= 0) return "";
 	if (n >= 1000000) return `${Math.round(n / 1000000)}M`;
@@ -166,15 +301,15 @@ function formatContextWindowForUi(tokens) {
  * deliberately the HOST's rule (a default must exist), not the old
  * options-only one, so the two screens cannot diverge again.
  */
-function windowLabelOf(model, preferMax) {
+function windowLabelOf(model: CardModelRow, preferMax: boolean): string {
 	const hostLabel = model.contextWindowLabel;
-	const options = Array.isArray(model.contextOptions) ? model.contextOptions.filter((n) => Number(n) > 0) : [];
+	const options = Array.isArray(model.contextOptions) ? model.contextOptions.filter((n): n is number => Number(n) > 0) : [];
 	// Nothing offered, or nothing marked as the default: no label, which is the
 	// host's `contextWindowIsReal` rule.
 	if (options.length === 0 || !(Number(model.defaultContextWindow) > 0)) return "";
 	// The toggled state, which no host field can express, is the widest offered
 	// window; otherwise the host's own label already says it.
-	if (preferMax) return formatContextWindowForUi(Math.max(...options));
+	if (preferMax) return formatContextWindowForUi(Math.max(...options.map(Number)));
 	return typeof hostLabel === "string" ? hostLabel : formatContextWindowForUi(Number(model.defaultContextWindow));
 }
 
@@ -186,7 +321,7 @@ function windowLabelOf(model, preferMax) {
  * window — the two are related by exactly `before x discount`. Reading
  * `priceFactor` alone understates the cost for most of the day.
  */
-function rateAt(model, now) {
+function rateAt(model: CardModelRow, now: Date): number | undefined {
 	const base = Number(model.priceFactor);
 	const promo = model.promotion;
 	if (promo === null || typeof promo !== "object") return Number.isFinite(base) ? base : undefined;
@@ -223,10 +358,10 @@ function rateAt(model, now) {
  * The protocol verdict wins over a transient one in the same payload, since it
  * is the one that cannot resolve on its own.
  */
-function refreshNoticeKey(value) {
-	const failures = Array.isArray(value?.refreshFailures) ? value.refreshFailures : [];
+function refreshNoticeKey(value: unknown): string | null {
+	const failures = Array.isArray((value as { refreshFailures?: unknown } | null | undefined)?.refreshFailures) ? (value as { refreshFailures: unknown[] }).refreshFailures : [];
 	if (failures.length === 0) return null;
-	if (failures.some((f) => f?.reason === "protocol-shape-changed")) return "protocol-shape-changed";
+	if (failures.some((f) => (f as { reason?: string } | null | undefined)?.reason === "protocol-shape-changed")) return "protocol-shape-changed";
 	return "transient";
 }
 
@@ -237,10 +372,19 @@ function refreshNoticeKey(value) {
  * card presents that same state as "everything ticked" — otherwise a fresh
  * install would render every box empty while every model was visible.
  */
-function enabledIdsFor(models, saved) {
-	const list = Array.isArray(saved) ? saved.filter((id) => typeof id === "string") : [];
+function enabledIdsFor(models: CardModelRow[], saved: unknown): Set<string> {
+	const list = Array.isArray(saved) ? saved.filter((id): id is string => typeof id === "string") : [];
 	if (list.length === 0) return new Set(models.map((model) => model.id));
 	return new Set(list);
+}
+
+/** Props for {@link QuotaBlock}. */
+interface QuotaBlockProps {
+	t: TranslateFn
+	label: string
+	quota: CardQuota
+	when?: string
+	badge?: string
 }
 
 /**
@@ -248,7 +392,7 @@ function enabledIdsFor(models, saved) {
  * used/total figures. Shared by the plan quota, the add-on package and the
  * per-model dedicated packages, which differ only in their wording.
  */
-function QuotaBlock({ t, label, quota, when, badge }) {
+function QuotaBlock({ t, label, quota, when, badge }: QuotaBlockProps) {
 	const percentage = Math.min(1, Math.max(0, Number(quota.percentage) || 0));
 	// Round before formatting: a ratio like 268/2000 is 0.14 in binary
 	// floating point, and rendering the raw product would emit
@@ -259,7 +403,15 @@ function QuotaBlock({ t, label, quota, when, badge }) {
 	// status dot use, so a green bar, a green badge and a green dot
 	// all read as "fine" at once. Past 80% it turns amber and a
 	// spent quota red, keeping a nearly-empty bar legible at a glance.
-	const tone = quota.remaining <= 0 ? " dsm-qoder-bar-full" : percentage >= 0.8 ? " dsm-qoder-bar-warn" : "";
+	// "Unknown" is not "exceeded". Upstream may omit `remaining` entirely, and
+	// `undefined <= 0` is false — so the report below stays off in that case,
+	// which is the honest answer: the card must not claim a quota is spent when
+	// it simply was not told. (Before this was made explicit the figure line
+	// below also rendered the literal text "undefined" into the UI.)
+	const remaining = quota.remaining;
+	const known = typeof remaining === "number" && Number.isFinite(remaining);
+	const exhausted = known && remaining <= 0;
+	const tone = exhausted ? " dsm-qoder-bar-full" : percentage >= 0.8 ? " dsm-qoder-bar-warn" : "";
 	const unit = quota.unit === "credits" ? t("usage.credits") : quota.unit ?? "";
 	return (0, react_jsx_runtime.jsxs)("div", {
 		className: "dsm-qoder-usage-block",
@@ -272,7 +424,7 @@ function QuotaBlock({ t, label, quota, when, badge }) {
 						className: "dsm-qoder-usage-badge dsm-qoder-usage-badge-offer",
 						children: badge
 					}) : null,
-					quota.remaining <= 0 ? (0, react_jsx_runtime.jsx)("span", {
+					exhausted ? (0, react_jsx_runtime.jsx)("span", {
 						className: "dsm-qoder-usage-badge",
 						children: t("usage.exceeded")
 					}) : null,
@@ -304,7 +456,7 @@ function QuotaBlock({ t, label, quota, when, badge }) {
 						]
 					}),
 					(0, react_jsx_runtime.jsx)("span", {
-						children: `${t("usage.remaining")} ${quota.remaining}${unit ? ` ${unit}` : ""}`
+						children: `${t("usage.remaining")} ${known ? remaining : "—"}${unit ? ` ${unit}` : ""}`
 					})
 				]
 			})
@@ -326,7 +478,15 @@ function QuotaBlock({ t, label, quota, when, badge }) {
  * no arithmetic of its own: whether today's round exists, and whether it has
  * been claimed, are answered upstream and merely rendered here.
  */
-function CheckinRow({ t, checkin, busy, onClaim }) {
+/** Props for {@link CheckinRow}. */
+interface CheckinRowProps {
+	t: TranslateFn
+	checkin: Record<string, unknown>
+	busy: boolean
+	onClaim: EventHandler
+}
+
+function CheckinRow({ t, checkin, busy, onClaim }: CheckinRowProps) {
 	const claimed = checkin.todayCheckedIn === true;
 	const amount = typeof checkin.amount === "number" ? checkin.amount : undefined;
 	return (0, react_jsx_runtime.jsxs)("div", {
@@ -356,8 +516,17 @@ function CheckinRow({ t, checkin, busy, onClaim }) {
 	});
 }
 
+/** Props for {@link RegionUsage}. */
+interface RegionUsageProps {
+	t: TranslateFn
+	entry: CardUsageRegion & Record<string, unknown>
+	checkinBusy?: boolean
+	checkinNotice?: { kind?: string; message?: string; amount?: number } | null
+	onClaimCheckin?: EventHandler
+}
+
 /** One region's usage block, as returned by the host usage route. */
-function RegionUsage({ t, entry, checkinBusy = false, checkinNotice = undefined, onClaimCheckin = undefined }) {
+function RegionUsage({ t, entry, checkinBusy = false, checkinNotice = undefined, onClaimCheckin = undefined }: RegionUsageProps) {
 	if (entry.available !== true) {
 		return (0, react_jsx_runtime.jsxs)("div", {
 			className: "dsm-qoder-usage-block",
@@ -383,7 +552,7 @@ function RegionUsage({ t, entry, checkinBusy = false, checkinNotice = undefined,
 				t,
 				label: t("usage.planCredits"),
 				quota: entry.userQuota,
-				when: withDate(t("usage.renewsOn"), entry.expiresAt)
+				when: withDate(t("usage.renewsOn"), typeof entry.expiresAt === "number" ? entry.expiresAt : undefined)
 			}) : null,
 			entry.addOnQuota !== undefined ? (0, react_jsx_runtime.jsx)(QuotaBlock, {
 				t,
@@ -400,7 +569,7 @@ function RegionUsage({ t, entry, checkinBusy = false, checkinNotice = undefined,
 						t,
 						label: pack.name || t("usage.dedicatedPackage"),
 						quota: pack,
-						when: withDate(t("usage.expiresOn"), pack.expiresAt)
+						when: withDate(t("usage.expiresOn"), typeof pack.expiresAt === "number" ? pack.expiresAt : undefined)
 					})
 				]
 			}, `pack:${pack.id}:${index}`)),
@@ -416,7 +585,10 @@ function RegionUsage({ t, entry, checkinBusy = false, checkinNotice = undefined,
 						busy: checkinBusy,
 						onClaim: onClaimCheckin
 					}),
-					checkinNotice !== undefined ? (0, react_jsx_runtime.jsx)("p", {
+					// `!= null` covers BOTH absent and explicit null, which is what
+					// the prop type allows (`… | null`). Testing only for
+					// `undefined` let a `null` through to the `.kind` reads below.
+					checkinNotice != null ? (0, react_jsx_runtime.jsx)("p", {
 						className: checkinNotice.kind === "error" ? "dsm-qoder-error" : "dsm-qoder-state",
 						children: checkinNotice.kind === "error" ? t("usage.checkinError", {
 							message: checkinNotice.message ?? ""
@@ -436,7 +608,7 @@ function RegionUsage({ t, entry, checkinBusy = false, checkinNotice = undefined,
 					}),
 					" ",
 					camp.title,
-					camp.endsAt !== undefined ? ` · ${withDate(t("usage.expiresOn"), camp.endsAt)}` : "",
+					camp.endsAt !== undefined ? ` · ${withDate(t("usage.expiresOn"), typeof camp.endsAt === "number" ? camp.endsAt : undefined)}` : "",
 					camp.detailUrl ? (0, react_jsx_runtime.jsxs)(react.Fragment, {
 						children: [
 							" ",
@@ -464,13 +636,20 @@ function RegionUsage({ t, entry, checkinBusy = false, checkinNotice = undefined,
  * the account panel's re-read lands, the card bumps it, and this panel
  * forces a fresh quota pull for what the host can now serve.
  */
-function QoderUsagePanel({ t, refreshToken = 0, activeRegion = "qoder-cn" }) {
-	const [regions, setRegions] = (0, react.useState)([]);
+/** Props for {@link QoderUsagePanel}. */
+interface QoderUsagePanelProps {
+	t: TranslateFn
+	refreshToken?: number
+	activeRegion?: string
+}
+
+function QoderUsagePanel({ t, refreshToken = 0, activeRegion = "qoder-cn" }: QoderUsagePanelProps) {
+	const [regions, setRegions] = react.useState<CardUsageRegion[]>([]);
 	const [status, setStatus] = (0, react.useState)("loading");
-	const [notice, setNotice] = (0, react.useState)(undefined);
+	const [notice, setNotice] = react.useState<string | undefined>(undefined);
 	const [busy, setBusy] = (0, react.useState)(false);
 	const [claimBusy, setClaimBusy] = (0, react.useState)(false);
-	const [claimNotice, setClaimNotice] = (0, react.useState)(undefined);
+	const [claimNotice, setClaimNotice] = react.useState<{ kind?: string; message?: string; amount?: number } | undefined>(undefined);
 	const mounted = (0, react.useRef)(true);
 	(0, react.useEffect)(() => {
 		mounted.current = true;
@@ -478,20 +657,20 @@ function QoderUsagePanel({ t, refreshToken = 0, activeRegion = "qoder-cn" }) {
 			mounted.current = false;
 		};
 	}, []);
-	const load = (0, react.useCallback)(async (refresh) => {
+	const load = (0, react.useCallback)(async (refresh: boolean) => {
 		setBusy(true);
 		try {
 			const response = await fetch(`${QODER_USAGE_PATH}${refresh ? "?refresh=1" : ""}`, {
 				headers: { accept: "application/json" },
 				credentials: "same-origin"
 			});
-			const value = await response.json().catch(() => void 0);
+			const value = await response.json().catch((): undefined => void 0);
 			if (!response.ok || value === void 0) throw new Error(`HTTP ${response.status}`);
 			if (!mounted.current) return;
 			setRegions(Array.isArray(value.regions) ? value.regions : []);
 			setStatus("ready");
 			setNotice(undefined);
-		} catch (error) {
+		} catch (error: any) {
 			if (!mounted.current) return;
 			setStatus("error");
 			setNotice(error instanceof Error ? error.message : String(error));
@@ -513,7 +692,7 @@ function QoderUsagePanel({ t, refreshToken = 0, activeRegion = "qoder-cn" }) {
 				headers: { accept: "application/json" },
 				credentials: "same-origin"
 			});
-			const value = await response.json().catch(() => void 0);
+			const value = await response.json().catch((): undefined => void 0);
 			if (!response.ok) throw new Error(value?.error ?? `HTTP ${response.status}`);
 			if (mounted.current) setClaimNotice({
 				kind: value?.replayed === true ? "already" : "granted",
@@ -522,7 +701,7 @@ function QoderUsagePanel({ t, refreshToken = 0, activeRegion = "qoder-cn" }) {
 				amount: typeof value?.amount === "number" ? value.amount : void 0
 			});
 			await load(true);
-		} catch (error) {
+		} catch (error: any) {
 			if (mounted.current) setClaimNotice({
 				kind: "error",
 				message: error instanceof Error ? error.message : String(error)
@@ -629,23 +808,32 @@ function QoderUsagePanel({ t, refreshToken = 0, activeRegion = "qoder-cn" }) {
  *   region contributes zero models, and the picker + card list hide
  *   it via the same host predicate.
  */
-function QoderAccountPanel({ t, onReconciled, settingsScope, activeRegion = "qoder-cn", onRegionChange }) {
-	const [accounts, setAccounts] = (0, react.useState)([]);
+/** Props for {@link QoderAccountPanel}. */
+interface QoderAccountPanelProps {
+	t: TranslateFn
+	onReconciled?: () => void
+	settingsScope?: SettingsScope
+	activeRegion?: string
+	onRegionChange?: (regionId: string) => void
+}
+
+function QoderAccountPanel({ t, onReconciled, settingsScope, activeRegion = "qoder-cn", onRegionChange }: QoderAccountPanelProps) {
+	const [accounts, setAccounts] = react.useState<CardAccountEntry[]>([]);
 	const [status, setStatus] = (0, react.useState)("loading");
 	const [reloading, setReloading] = (0, react.useState)(false);
 	// One confirm outcome per region: `{ kind: "confirmed" |
 	// "sign-in-expired" | "unavailable", detail? }`. Absent means
 	// "not asked since the last re-read".
-	const [confirmState, setConfirmState] = (0, react.useState)({});
-	const [confirmBusy, setConfirmBusy] = (0, react.useState)({});
+	const [confirmState, setConfirmState] = react.useState<Record<string, { kind?: string; detail?: string }>>({});
+	const [confirmBusy, setConfirmBusy] = react.useState<Record<string, boolean>>({});
 	// The per-region provider switch. The host answers with the fully
 	// resolved map for every known region, so saving posts that whole
 	// map back — a host-side per-region merge can never lose a
 	// sibling region, and the scope-mirror fallback replaces a field
 	// it always holds in full.
-	const [enabledRegions, setEnabledRegions] = (0, react.useState)({});
+	const [enabledRegions, setEnabledRegions] = react.useState<Record<string, boolean>>({});
 	const [toggling, setToggling] = (0, react.useState)(false);
-	const [offerError, setOfferError] = (0, react.useState)(undefined);
+	const [offerError, setOfferError] = react.useState<string | undefined>(undefined);
 	const mounted = (0, react.useRef)(true);
 	(0, react.useEffect)(() => {
 		mounted.current = true;
@@ -659,7 +847,7 @@ function QoderAccountPanel({ t, onReconciled, settingsScope, activeRegion = "qod
 				headers: { accept: "application/json" },
 				credentials: "same-origin"
 			});
-			const value = await response.json().catch(() => void 0);
+			const value = await response.json().catch((): undefined => void 0);
 			if (!response.ok || value === void 0) throw new Error(`HTTP ${response.status}`);
 			if (!mounted.current) return;
 			const regions = Array.isArray(value.regions) ? value.regions : [];
@@ -667,7 +855,7 @@ function QoderAccountPanel({ t, onReconciled, settingsScope, activeRegion = "qod
 			// Prefer the host-resolved map; fall back to each region's
 			// own `enabled` flag so an older host that predates the
 			// map still drives the switch (absent = offered).
-			const map = value.enabledRegions !== null && typeof value.enabledRegions === "object" ? value.enabledRegions : Object.fromEntries(regions.filter((entry) => entry.region !== undefined).map((entry) => [entry.region, entry.enabled !== false]));
+			const map = value.enabledRegions !== null && typeof value.enabledRegions === "object" ? value.enabledRegions as Record<string, boolean> : Object.fromEntries((regions as CardAccountEntry[]).filter((entry) => entry.region !== undefined).map((entry) => [entry.region, entry.enabled !== false]));
 			setEnabledRegions(map);
 			setStatus("ready");
 		} catch {
@@ -730,7 +918,7 @@ function QoderAccountPanel({ t, onReconciled, settingsScope, activeRegion = "qod
 				credentials: "same-origin",
 				body: JSON.stringify({ region: regionId })
 			});
-			const value = await response.json().catch(() => void 0);
+			const value = await response.json().catch((): undefined => void 0);
 			if (!response.ok || value === void 0) throw new Error(`HTTP ${response.status}`);
 			if (!mounted.current) return;
 			if (value.available !== true) {
@@ -746,7 +934,7 @@ function QoderAccountPanel({ t, onReconciled, settingsScope, activeRegion = "qod
 					detail: value.detail
 				}
 			}));
-		} catch (error) {
+		} catch (error: any) {
 			if (!mounted.current) return;
 			setConfirmState((current) => ({
 				...current,
@@ -778,7 +966,7 @@ function QoderAccountPanel({ t, onReconciled, settingsScope, activeRegion = "qod
 			await writeSettingsField(settingsScope, "enabledRegions", next);
 			if (onReconciled !== void 0) onReconciled();
 			await load();
-		} catch (error) {
+		} catch (error: any) {
 			setEnabledRegions((current) => ({ ...current, [regionId]: !nextOn }));
 			if (mounted.current) setOfferError(String(error?.message ?? error));
 		} finally {
@@ -789,34 +977,45 @@ function QoderAccountPanel({ t, onReconciled, settingsScope, activeRegion = "qod
 	// red or amber, and "not installed" stays neutral — the absence of
 	// an app is not a fault of this machine. The same tones drive the
 	// status dots on the region strip.
-	const dotClassOf = (state) => state === "ok" ? " dsm-qoder-region-dot-ok" : state === "expired" ? " dsm-qoder-region-dot-expired" : state === "needs-app" ? " dsm-qoder-region-dot-needs" : "";
-	const stateLabelOf = (entry) => t(`account.state.${entry.state}`);
+	const dotClassOf = (state: string | undefined) => state === "ok" ? " dsm-qoder-region-dot-ok" : state === "expired" ? " dsm-qoder-region-dot-expired" : state === "needs-app" ? " dsm-qoder-region-dot-needs" : "";
+	const stateLabelOf = (entry: CardAccountEntry) => t(`account.state.${entry.state}`);
 	// The strip shows every known region; the detail below it shows
 	// only the one the strip has selected. A selection that no longer
 	// exists should not happen — the host always answers with both
 	// regions — but it falls back to the first entry rather than
 	// breaking the panel.
 	const activeEntry = accounts.find((entry) => entry.region === activeRegion) ?? accounts[0];
-	const activeOffered = activeEntry !== undefined && enabledRegions[activeEntry.region] !== false;
-	const activeResult = activeEntry !== undefined ? confirmState[activeEntry.region] : undefined;
-	const activeHasIdentity = activeEntry !== undefined && activeEntry.identity !== undefined && activeEntry.identity !== null;
-	const activeName = activeHasIdentity ? String(activeEntry.identity.name ?? "").trim() : "";
+	// `region` is optional on the entry, so it cannot be used as an index until
+	// it is known to be a string. An entry with no region is not addressable in
+	// the per-region maps at all, which is why the fallbacks below answer
+	// "nothing recorded for it" rather than guessing a key.
+	const activeRegionId = activeEntry?.region;
+	// The label the four user-facing strings interpolate. Built once from the
+	// two optional sources rather than repeated as `regionName ?? region` at
+	// each site: that spelling is `string | undefined`, which the translation
+	// helper does not accept, and a missing label must read as an empty string
+	// rather than the word "undefined".
+	const activeEdition = activeEntry?.regionName ?? activeRegionId ?? "";
+	const activeOffered = activeEntry !== undefined && activeRegionId !== undefined && enabledRegions[activeRegionId] !== false;
+	const activeResult = activeEntry !== undefined && activeRegionId !== undefined ? confirmState[activeRegionId] : undefined;
+	// Bound once and tested once: `activeHasIdentity` is a boolean, so it cannot
+	// narrow `activeEntry.identity` at the reads below. Holding the identity
+	// itself is what lets the three later reads be checked rather than asserted.
+	const activeIdentity = activeEntry?.identity ?? undefined;
+	const activeHasIdentity = activeIdentity !== undefined && activeIdentity !== null;
+	const activeName = activeHasIdentity ? String(activeIdentity.name ?? "").trim() : "";
 	// The same three chips the old rows carried: credential source,
 	// app name, and the sign-in's expiry date — now for one region.
 	const activeMeta = [];
 	if (activeEntry !== undefined) {
 		if (activeEntry.source === "env-pat") activeMeta.push(t("account.envPat"));
 		else if (typeof activeEntry.appName === "string" && activeEntry.appName !== "") activeMeta.push(t("account.appFrom", { app: activeEntry.appName }));
-		if (activeHasIdentity && Number(activeEntry.identity.expiresAt) > 0) activeMeta.push(withDate(t("account.expiresAt"), activeEntry.identity.expiresAt));
+		if (activeHasIdentity && Number(activeIdentity.expiresAt) > 0) activeMeta.push(withDate(t("account.expiresAt"), activeIdentity.expiresAt));
 	}
-	// A manage-page link accompanies every state the card cannot fix
-	// by itself; only the selected region's notes carry one now.
-	const activeManageLink = activeEntry !== undefined && typeof activeEntry.manageUrl === "string" && activeEntry.manageUrl !== "" ? (0, react_jsx_runtime.jsx)("a", {
-		href: activeEntry.manageUrl,
-		target: "_blank",
-		rel: "noreferrer",
-		children: ` · ${t("account.openManage")}`
-	}) : null;
+	// The expired / not-installed states no longer drag the user onto the
+	// website: they point at the client (re-sign-in / install) and carry
+	// the region's download link, labelled with where it goes. The manage
+	// link is therefore gone, and with it the `manageUrl` render.
 	return (0, react_jsx_runtime.jsxs)("div", {
 		className: "dsm-qoder-account",
 		children: [
@@ -852,14 +1051,23 @@ function QoderAccountPanel({ t, onReconciled, settingsScope, activeRegion = "qod
 						role: "tablist",
 						"aria-label": t("account.regionTabs"),
 						children: accounts.map((entry) => {
+							// A region-less entry is not addressable: it has no
+							// key in `enabledRegions`, nothing to select, and
+							// nothing to pass to `onRegionChange`. The host
+							// always names one, so this narrows the type at the
+							// render boundary instead of asserting it, and an
+							// unnamed entry is skipped rather than rendered as a
+							// tab that cannot work.
+							const regionId = entry.region;
+							if (regionId === undefined) return null;
 							// Provider switch state. The local map is
 							// the source of truth for the switch (it
 							// settles on the host value after each
 							// save); a region with no key yet reads
 							// as offered, the same default the host
 							// predicate uses.
-							const offered = enabledRegions[entry.region] !== false;
-							const isActive = entry.region === activeRegion;
+							const offered = enabledRegions[regionId] !== false;
+							const isActive = regionId === activeRegion;
 							return (0, react_jsx_runtime.jsxs)("div", {
 								className: `dsm-qoder-region-tab-cell${isActive ? " dsm-qoder-region-tab-cell-active" : ""}`,
 								children: [(0, react_jsx_runtime.jsxs)("button", {
@@ -867,9 +1075,9 @@ function QoderAccountPanel({ t, onReconciled, settingsScope, activeRegion = "qod
 									role: "tab",
 									"aria-selected": isActive,
 									className: `dsm-qoder-region-tab${offered ? "" : " dsm-qoder-region-tab-off"}`,
-									title: `${entry.regionName ?? entry.region} · ${stateLabelOf(entry)}`,
+									title: `${entry.regionName ?? regionId} · ${stateLabelOf(entry)}`,
 									onClick: () => {
-										if (typeof onRegionChange === "function") onRegionChange(entry.region);
+										if (typeof onRegionChange === "function") onRegionChange(regionId);
 										// Choosing a not-ok region is also
 										// the moment the user has just
 										// signed in over there: run the
@@ -891,7 +1099,7 @@ function QoderAccountPanel({ t, onReconciled, settingsScope, activeRegion = "qod
 										className: "dsm-qoder-region-toggle",
 										checked: offered,
 										disabled: toggling,
-										onChange: (event) => {
+										onChange: (event: CheckboxEvent) => {
 											void toggleRegion(entry.region, event.target.checked);
 										},
 										"aria-label": `${t("account.offer")}: ${entry.regionName ?? entry.region}`
@@ -922,14 +1130,14 @@ function QoderAccountPanel({ t, onReconciled, settingsScope, activeRegion = "qod
 										]
 									}),
 									(0, react_jsx_runtime.jsx)("span", { className: "dsm-qoder-usage-spacer" }),
-									activeEntry.source !== undefined ? (0, react_jsx_runtime.jsx)("button", {
+									activeEntry.source !== undefined && activeRegionId !== undefined ? (0, react_jsx_runtime.jsx)("button", {
 										type: "button",
 										className: "dsm-qoder-button",
-										disabled: confirmBusy[activeEntry.region] === true,
+										disabled: confirmBusy[activeRegionId] === true,
 										onClick: () => {
-											void confirm(activeEntry.region);
+											void confirm(activeRegionId);
 										},
-										children: confirmBusy[activeEntry.region] === true ? t("account.confirming") : t("account.confirm")
+										children: confirmBusy[activeRegionId] === true ? t("account.confirming") : t("account.confirm")
 									}) : null
 								]
 							}),
@@ -940,34 +1148,78 @@ function QoderAccountPanel({ t, onReconciled, settingsScope, activeRegion = "qod
 						activeEntry.state === "needs-app" ? (0, react_jsx_runtime.jsxs)("p", {
 							className: "dsm-qoder-account-note dsm-qoder-account-note-error",
 							children: [
-								t("account.readFail", { detail: activeEntry.detail ?? "" }),
-								activeManageLink
+								t("account.readFail", { detail: activeEntry.detail ?? "" })
 							]
 						}) : null,
 						activeEntry.state === "expired" ? (0, react_jsx_runtime.jsxs)("p", {
 							className: "dsm-qoder-account-note",
 							children: [
-								t("account.expiredHint"),
-								activeManageLink
+								(0, react_jsx_runtime.jsx)("span", {
+									children: t("account.expiredHint", {
+										app: activeEntry.appName ?? activeEntry.regionName ?? "Qoder"
+									})
+								}),
+								(0, react_jsx_runtime.jsx)("br"),
+								(0, react_jsx_runtime.jsxs)("span", {
+									children: [
+										t("account.download", {
+											edition: activeEdition
+										}),
+										typeof activeEntry.downloadUrl === "string" && activeEntry.downloadUrl !== "" ? (0, react_jsx_runtime.jsxs)(react.Fragment, {
+											children: [
+												" · ",
+												(0, react_jsx_runtime.jsx)("a", {
+													href: activeEntry.downloadUrl,
+													target: "_blank",
+													rel: "noreferrer",
+													title: activeEntry.downloadUrl,
+													children: t("account.downloadLink", {
+														edition: activeEdition
+													})
+												})
+											]
+										}) : null
+									]
+								})
 							]
 						}) : null,
 						activeEntry.state === "signed-out" ? (0, react_jsx_runtime.jsxs)("p", {
 							className: "dsm-qoder-account-note",
 							children: [
-								t("account.unsigned"),
-								activeManageLink
+								(0, react_jsx_runtime.jsx)("span", {
+									children: t("account.unsigned")
+								}),
+								(0, react_jsx_runtime.jsx)("br"),
+								(0, react_jsx_runtime.jsxs)("span", {
+									children: [
+										t("account.download", {
+											edition: activeEdition
+										}),
+										typeof activeEntry.downloadUrl === "string" && activeEntry.downloadUrl !== "" ? (0, react_jsx_runtime.jsxs)(react.Fragment, {
+											children: [
+												" · ",
+												(0, react_jsx_runtime.jsx)("a", {
+													href: activeEntry.downloadUrl,
+													target: "_blank",
+													rel: "noreferrer",
+													title: activeEntry.downloadUrl,
+													children: t("account.downloadLink", {
+														edition: activeEdition
+													})
+												})
+											]
+										}) : null
+									]
+								})
 							]
 						}) : null,
 						activeResult?.kind === "confirmed" ? (0, react_jsx_runtime.jsx)("p", {
 							className: "dsm-qoder-account-note",
 							children: t("account.confirmed")
 						}) : null,
-						activeResult?.kind === "sign-in-expired" ? (0, react_jsx_runtime.jsxs)("p", {
+						activeResult?.kind === "sign-in-expired" ? (0, react_jsx_runtime.jsx)("p", {
 							className: "dsm-qoder-account-note dsm-qoder-account-note-error",
-							children: [
-								t("account.confirmExpired"),
-								activeManageLink
-							]
+							children: t("account.confirmExpired")
 						}) : null,
 						activeResult?.kind === "unavailable" ? (0, react_jsx_runtime.jsx)("p", {
 							className: "dsm-qoder-account-note dsm-qoder-account-note-error",
@@ -1009,35 +1261,47 @@ function QoderAccountPanel({ t, onReconciled, settingsScope, activeRegion = "qod
  * @param view - the `view` prop the host slot passed, if any.
  * @returns true when the card should start expanded.
  */
-function initialOpenForView(view) {
+function initialOpenForView(view: unknown): boolean {
 	return view === "page";
 }
 
+/** Props for the card the host's slot system mounts. */
+interface QoderPluginCardProps {
+	t: TranslateFn
+	settingsScope?: SettingsScope
+	/** The host slot's `view` discriminator (`"page"` renders expanded). */
+	view?: unknown
+}
+
 /** Render the Qoder model and image-input card. */
-export function QoderPluginCard({ t, settingsScope, view }) {
+export function QoderPluginCard({ t, settingsScope, view }: QoderPluginCardProps) {
 	if (t === void 0) throw new Error("Qoder settings card requires its translation function");
 	const [open, setOpen] = (0, react.useState)(() => initialOpenForView(view));
-	const [models, setModels] = (0, react.useState)([]);
-	const [imageOverrides, setImageOverrides] = (0, react.useState)({});
-	const [savedOverrides, setSavedOverrides] = (0, react.useState)({});
+	const [models, setModels] = react.useState<CardModelRow[]>([]);
+	const [imageOverrides, setImageOverrides] = react.useState<Record<string, string>>({});
+	const [savedOverrides, setSavedOverrides] = react.useState<Record<string, string>>({});
 	const [maxWindow, setMaxWindow] = (0, react.useState)(false);
 	const [savedMaxWindow, setSavedMaxWindow] = (0, react.useState)(false);
 	// Picker visibility, per region. The host stores an empty list as "no
 	// filter", so the card keeps the same shape and renders that state as
 	// "everything ticked".
-	const [enabledIds, setEnabledIds] = (0, react.useState)({});
-	const [savedEnabledIds, setSavedEnabledIds] = (0, react.useState)({});
+	const [enabledIds, setEnabledIds] = react.useState<Record<string, string[]>>({});
+	const [savedEnabledIds, setSavedEnabledIds] = react.useState<Record<string, string[]>>({});
 	const [status, setStatus] = (0, react.useState)("loading");
 	const [saving, setSaving] = (0, react.useState)(false);
-	const [notice, setNotice] = (0, react.useState)(undefined);
+	const [notice, setNotice] = react.useState<string | undefined>(undefined);
 	const [refreshing, setRefreshing] = (0, react.useState)(false);
-	const [refreshedAt, setRefreshedAt] = (0, react.useState)(undefined);
+	const [refreshedAt, setRefreshedAt] = react.useState<number | undefined>(undefined);
 	// The host's own verdict about the last refresh, folded to one of
 	// `null` / "transient" / "protocol-shape-changed" by refreshNoticeKey.
 	// Kept apart from `notice` (which is the save/discard banner) so an
 	// upstream problem never borrows the save banner's styling, and from
 	// `status` (which is about whether the ROUTE answered at all).
-	const [refreshFailure, setRefreshFailure] = (0, react.useState)(null);
+	// Written explicitly because `useState(null)` infers the state as exactly
+	// `null`, and the three values the comment above names are strings — the
+	// inference and the documented contract disagreed, which the setter below
+	// is where it surfaced.
+	const [refreshFailure, setRefreshFailure] = react.useState<string | null>(null);
 	// Bumped when the account panel's re-read lands; the usage panel
 	// treats a non-zero value as "force a fresh quota pull".
 	const [usageBump, setUsageBump] = (0, react.useState)(0);
@@ -1054,7 +1318,11 @@ export function QoderPluginCard({ t, settingsScope, view }) {
 	// The model id whose row should flash, set by the last in-place edit
 	// (checkbox tick or image-mode pick). A timeout clears it, so the CSS
 	// animation plays once and the row settles back.
-	const [pulse, setPulse] = (0, react.useState)(undefined);
+	// The id of the row to flash, or `undefined` when nothing is flashing.
+	// Written explicitly because `useState(undefined)` infers `S = undefined`,
+	// so the setter would only accept `undefined` — and both callers below set
+	// it to a model id (see the `setPulse(modelId)` in `setMode` / `toggle`).
+	const [pulse, setPulse] = react.useState<string | undefined>(undefined);
 	// A ticking clock, so the off-peak rate and its countdown flip on their
 	// own at the window boundary instead of waiting for a manual refresh.
 	// The tick only runs when at least one model carries a usable
@@ -1102,7 +1370,7 @@ export function QoderPluginCard({ t, settingsScope, view }) {
 	 * the first load: a refresh must not clobber edits the user has staged
 	 * but not yet saved.
 	 */
-	const load = (0, react.useCallback)(async (refresh, signal) => {
+	const load = (0, react.useCallback)(async (refresh, signal?: AbortSignal) => {
 		if (refresh) setRefreshing(true);
 		try {
 			const response = await fetch(`${QODER_MODELS_PATH}${refresh ? "?refresh=1" : ""}`, {
@@ -1110,7 +1378,7 @@ export function QoderPluginCard({ t, settingsScope, view }) {
 				credentials: "same-origin",
 				signal
 			});
-			const value = await response.json().catch(() => void 0);
+			const value = await response.json().catch((): undefined => void 0);
 			if (!response.ok || value === void 0) throw new Error(`HTTP ${response.status}`);
 			if (!mounted.current) return;
 			setModels(Array.isArray(value.models) ? value.models : []);
@@ -1133,7 +1401,7 @@ export function QoderPluginCard({ t, settingsScope, view }) {
 			setRefreshedAt(typeof value.refreshedAt === "number" ? value.refreshedAt : undefined);
 			setRefreshFailure(refreshNoticeKey(value));
 			setStatus("ready");
-		} catch (error) {
+		} catch (error: any) {
 			if (!mounted.current || signal?.aborted === true) return;
 			setStatus("error");
 			setNotice(error instanceof Error ? error.message : String(error));
@@ -1158,9 +1426,9 @@ export function QoderPluginCard({ t, settingsScope, view }) {
 	// Every editable field participates in "has unsaved changes": the
 	// per-model image modes, the picker roster, and the context-window switch.
 	const dirty = (0, react.useMemo)(() => JSON.stringify(imageOverrides) !== JSON.stringify(savedOverrides) || JSON.stringify(enabledIds) !== JSON.stringify(savedEnabledIds) || maxWindow !== savedMaxWindow, [imageOverrides, savedOverrides, enabledIds, savedEnabledIds, maxWindow, savedMaxWindow]);
-	const setMode = (0, react.useCallback)((modelId, mode) => {
+	const setMode = (0, react.useCallback)((modelId: string, mode: string) => {
 		setImageOverrides((current) => {
-			const next = { ...current };
+			const next: Record<string, string> = { ...current };
 			// "auto" is the absence of an override, so an auto row never
 			// writes a key — the saved document stays minimal and a future
 			// catalog change is picked up again.
@@ -1181,7 +1449,7 @@ export function QoderPluginCard({ t, settingsScope, view }) {
 	 * allow-list rather than a diff. That is what lets a partially curated
 	 * region stay curated when the catalog later grows.
 	 */
-	const toggleModel = (0, react.useCallback)((regionId, modelId) => {
+	const toggleModel = (0, react.useCallback)((regionId: string, modelId: string) => {
 		setEnabledIds((current) => {
 			const roster = models.filter((m) => m.region === regionId).map((m) => m.id);
 			const active = enabledIdsFor(models, current[regionId]);
@@ -1209,7 +1477,7 @@ export function QoderPluginCard({ t, settingsScope, view }) {
 	 * touched; the sibling region's allow-list is preserved, exactly
 	 * like a per-model tick.
 	 */
-	const setRegionAll = (0, react.useCallback)((regionId, allOn) => {
+	const setRegionAll = (0, react.useCallback)((regionId: string, allOn: boolean) => {
 		setEnabledIds((current) => ({ ...current, [regionId]: allOn ? [HIDE_ALL_MODELS] : [] }));
 		setNotice(undefined);
 	}, []);
@@ -1234,7 +1502,7 @@ export function QoderPluginCard({ t, settingsScope, view }) {
 			setSavedMaxWindow(maxWindow);
 			setSavedEnabledIds(enabledIds);
 			setNotice(t("row.saved"));
-		} catch (error) {
+		} catch (error: any) {
 			setNotice(`${t("row.failed")}: ${error instanceof Error ? error.message : String(error)}`);
 		} finally {
 			if (mounted.current) setSaving(false);
@@ -1263,14 +1531,20 @@ export function QoderPluginCard({ t, settingsScope, view }) {
 	});
 	// Visible + ticked, for the counter beside the filter. Counted over
 	// `visibleModels` so the number matches the rows on screen.
-	const visibleTicked = visibleModels.filter((model) => enabledIdsFor(models, enabledIds[model.region]).has(model.id)).length;
+	//
+	// A row with no region has no key in `enabledIds`, and reading one with an
+	// `undefined` index is the bug this used to hide: the lookup answered
+	// "nothing saved", which `enabledIdsFor` reads as "no filter" and resolves
+	// to EVERY model ticked. Skipping the lookup is both the checked spelling
+	// and the truthful one — an unaddressable row cannot be counted as ticked.
+	const visibleTicked = visibleModels.filter((model) => model.region !== undefined && enabledIdsFor(models, enabledIds[model.region]).has(model.id)).length;
 	return (0, react_jsx_runtime.jsxs)("li", {
 		className: `dsm-plugin-card${open ? " dsm-plugin-card-open" : ""}`,
 		// Escape leaves the card in two steps: inside the search box it first
 		// clears the filter (the natural "get me out of this search" gesture);
 		// with the filter already clear it collapses the card from anywhere
 		// inside it, so a user lost in a long roster has one keystroke out.
-		onKeyDown: (event) => {
+		onKeyDown: (event: { key?: string }) => {
 			if (event.key !== "Escape" || !open) return;
 			if (query !== "") {
 				setQuery("");
@@ -1372,7 +1646,7 @@ export function QoderPluginCard({ t, settingsScope, view }) {
 							value: query,
 							placeholder: t("row.searchPlaceholder"),
 							"aria-label": t("row.search"),
-							onChange: (event) => setQuery(event.target.value)
+							onChange: (event: ValueEvent) => setQuery(event.target.value)
 						}), (0, react_jsx_runtime.jsx)("span", {
 							className: "dsm-qoder-count",
 							"aria-live": "polite",
@@ -1398,7 +1672,9 @@ export function QoderPluginCard({ t, settingsScope, view }) {
 					visibleModels.length > 0 ? (0, react_jsx_runtime.jsx)("ul", {
 						className: "dsm-qoder-models",
 						children: visibleModels.map((model) => {
-							const active = enabledIdsFor(models, enabledIds[model.region]).has(model.id);
+							// Same reasoning as `visibleTicked` above: an
+							// unaddressable row must not read as ticked.
+							const active = model.region !== undefined && enabledIdsFor(models, enabledIds[model.region]).has(model.id);
 							// The rate is resolved against the ticking clock, not the
 							// server's snapshot, so it flips at the window boundary.
 							const offPeak = offPeakState(model, clock);
@@ -1414,9 +1690,17 @@ export function QoderPluginCard({ t, settingsScope, view }) {
 										children: (0, react_jsx_runtime.jsx)("input", {
 											type: "checkbox",
 											checked: active,
-											disabled: saving,
+											// A row with no region cannot be
+											// toggled: `toggleModel` records the
+											// tick against that region's roster,
+											// and there is no roster to record it
+											// against. Disabled rather than
+											// silently doing nothing, so the
+											// control matches its behaviour.
+											disabled: saving || model.region === undefined,
 											"aria-label": `${t("row.showInPicker")}: ${model.name ?? model.id}`,
 											onChange: () => {
+												if (model.region === undefined) return;
 												toggleModel(model.region, model.id);
 											}
 										})
@@ -1449,8 +1733,8 @@ export function QoderPluginCard({ t, settingsScope, view }) {
 										value: imageModeOf(imageOverrides, model.id),
 										disabled: saving,
 										"aria-label": `${t("row.imageTitle")}: ${model.name ?? model.id}`,
-										onChange: (event) => {
-											setMode(model.id, event.target.value);
+										onChange: (event: unknown) => {
+											setMode(model.id, (event as ValueEvent).target.value);
 										},
 										children: IMAGE_MODES.map((mode) => (0, react_jsx_runtime.jsx)("option", {
 											value: mode,
@@ -1469,7 +1753,7 @@ export function QoderPluginCard({ t, settingsScope, view }) {
 						className: "dsm-qoder-hint",
 						children: t("row.offPeakHint", {
 							window: `${regionModels.find((model) => model.promotion !== undefined)?.promotion?.windowStart}–${regionModels.find((model) => model.promotion !== undefined)?.promotion?.windowEnd}`,
-							zone: regionModels.find((model) => model.promotion !== undefined)?.promotion?.timezone ?? "Asia/Shanghai"
+							zone: typeof regionModels.find((model) => model.promotion !== undefined)?.promotion?.timezone === "string" ? regionModels.find((model) => model.promotion !== undefined)?.promotion?.timezone as string : "Asia/Shanghai"
 						})
 					}) : null,
 					(0, react_jsx_runtime.jsxs)("label", {
@@ -1480,8 +1764,8 @@ export function QoderPluginCard({ t, settingsScope, view }) {
 							checked: maxWindow,
 							disabled: saving,
 							"aria-label": t("row.maxWindow"),
-							onChange: (event) => {
-								setMaxWindow(event.target.checked);
+							onChange: (event: unknown) => {
+								setMaxWindow((event as CheckboxEvent).target.checked);
 								setNotice(undefined);
 							}
 						}), (0, react_jsx_runtime.jsx)("span", {
